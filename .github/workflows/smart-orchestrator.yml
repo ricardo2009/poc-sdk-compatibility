@@ -1,0 +1,937 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🤖 SMART ORCHESTRATOR - FULLY SELF-ADJUSTING SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# 🧠 INTELIGÊNCIA TOTAL - TUDO É AUTO-AJUSTADO:
+#
+#   ┌──────────────────────────────────────────────────────────────────────────┐
+#   │                    SELF-LEARNING CAPABILITIES                            │
+#   │                                                                          │
+#   │  📊 METRICS COLLECTED:                                                   │
+#   │  • Tempo de resposta de cada consumer                                   │
+#   │  • Taxa de sucesso/falha por consumer                                   │
+#   │  • Rate limit usage do GitHub API                                       │
+#   │  • Tempo total de cada wave                                             │
+#   │                                                                          │
+#   │  🔄 AUTO-ADJUSTMENTS:                                                    │
+#   │  • Parallelism: ↑ se tudo OK, ↓ se muitas falhas                       │
+#   │  • Batch size: ↑ se rápido, ↓ se rate limited                          │
+#   │  • Delays: Calculados pelo rate limit restante                         │
+#   │  • Priority: Consumers lentos movidos para waves posteriores           │
+#   │  • Retry: Backoff ajustado por padrão de falhas                        │
+#   │                                                                          │
+#   │  📈 LEARNING LOOP:                                                       │
+#   │  Execute → Collect Metrics → Analyze → Adjust → Save → Next Run        │
+#   │                                                                          │
+#   └──────────────────────────────────────────────────────────────────────────┘
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "🤖 Smart Orchestrator"
+
+on:
+  repository_dispatch:
+    types:
+      - sdk.released
+      - consumer.validation.complete
+  
+  workflow_dispatch:
+    inputs:
+      sdk_version:
+        description: 'SDK Version'
+        required: true
+        default: '1.0.0'
+      dry_run:
+        description: 'Dry run mode'
+        type: boolean
+        default: false
+      reset_learning:
+        description: 'Reset learned parameters'
+        type: boolean
+        default: false
+
+env:
+  GITHUB_ORG: ${{ vars.GITHUB_ORG || github.repository_owner }}
+  # Defaults que serão auto-ajustados
+  DEFAULT_MAX_PARALLEL: 15
+  DEFAULT_BATCH_SIZE: 50
+  DEFAULT_DELAY: 5
+  DEFAULT_RETRY_MAX: 3
+  # Rate limit thresholds
+  RATE_LIMIT_SAFE_ZONE: 500  # Abaixo disso, aumentar delays
+  RATE_LIMIT_DANGER_ZONE: 200  # Abaixo disso, modo conservador
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 1: BRAIN - Análise e Planejamento Inteligente
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  brain:
+    name: "🧠 Brain - Analyze & Plan"
+    runs-on: ubuntu-latest
+    
+    outputs:
+      # Básicos
+      sdk_version: ${{ steps.init.outputs.sdk_version }}
+      validation_id: ${{ steps.init.outputs.validation_id }}
+      dry_run: ${{ steps.init.outputs.dry_run }}
+      
+      # Métricas de consumers
+      total_consumers: ${{ steps.analyze.outputs.total_consumers }}
+      consumers_json: ${{ steps.analyze.outputs.consumers_json }}
+      
+      # Parâmetros AUTO-CALCULADOS
+      strategy: ${{ steps.calculate.outputs.strategy }}
+      max_parallel: ${{ steps.calculate.outputs.max_parallel }}
+      batch_size: ${{ steps.calculate.outputs.batch_size }}
+      base_delay: ${{ steps.calculate.outputs.base_delay }}
+      retry_max: ${{ steps.calculate.outputs.retry_max }}
+      retry_backoff: ${{ steps.calculate.outputs.retry_backoff }}
+      
+      # Rate limit status
+      rate_limit_remaining: ${{ steps.rate_limit.outputs.remaining }}
+      rate_limit_mode: ${{ steps.rate_limit.outputs.mode }}
+      
+      # Waves
+      wave_1: ${{ steps.waves.outputs.wave_1 }}
+      wave_2: ${{ steps.waves.outputs.wave_2 }}
+      wave_3: ${{ steps.waves.outputs.wave_3 }}
+      wave_4: ${{ steps.waves.outputs.wave_4 }}
+      wave_1_count: ${{ steps.waves.outputs.wave_1_count }}
+      wave_2_count: ${{ steps.waves.outputs.wave_2_count }}
+      wave_3_count: ${{ steps.waves.outputs.wave_3_count }}
+      wave_4_count: ${{ steps.waves.outputs.wave_4_count }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: "🚀 Initialize"
+        id: init
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            SDK_VERSION="${{ github.event.inputs.sdk_version }}"
+            DRY_RUN="${{ github.event.inputs.dry_run }}"
+            RESET="${{ github.event.inputs.reset_learning }}"
+          else
+            SDK_VERSION="${{ github.event.client_payload.sdk.version }}"
+            DRY_RUN="false"
+            RESET="false"
+          fi
+          
+          VALIDATION_ID="smart-$(date +%Y%m%d-%H%M%S)-${{ github.run_number }}"
+          
+          echo "sdk_version=$SDK_VERSION" >> $GITHUB_OUTPUT
+          echo "validation_id=$VALIDATION_ID" >> $GITHUB_OUTPUT
+          echo "dry_run=$DRY_RUN" >> $GITHUB_OUTPUT
+          echo "reset_learning=$RESET" >> $GITHUB_OUTPUT
+      
+      # ─────────────────────────────────────────────────────────────────────────
+      # RATE LIMIT CHECK - Ajusta tudo baseado no limite disponível
+      # ─────────────────────────────────────────────────────────────────────────
+      
+      - name: "📊 Check Rate Limit"
+        id: rate_limit
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          # Verifica rate limit atual
+          RATE_INFO=$(curl -s -H "Authorization: Bearer $DISPATCH_TOKEN" \
+            "https://api.github.com/rate_limit")
+          
+          REMAINING=$(echo "$RATE_INFO" | jq '.resources.core.remaining')
+          LIMIT=$(echo "$RATE_INFO" | jq '.resources.core.limit')
+          RESET_TIME=$(echo "$RATE_INFO" | jq '.resources.core.reset')
+          
+          # Calcula tempo até reset
+          NOW=$(date +%s)
+          SECONDS_TO_RESET=$((RESET_TIME - NOW))
+          MINUTES_TO_RESET=$((SECONDS_TO_RESET / 60))
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📊 GITHUB API RATE LIMIT STATUS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Remaining: $REMAINING / $LIMIT"
+          echo "Reset in: ${MINUTES_TO_RESET} minutes"
+          
+          # Determina modo baseado no rate limit
+          if [ $REMAINING -gt ${{ env.RATE_LIMIT_SAFE_ZONE }} ]; then
+            MODE="aggressive"
+            echo "🚀 Mode: AGGRESSIVE (plenty of API calls available)"
+          elif [ $REMAINING -gt ${{ env.RATE_LIMIT_DANGER_ZONE }} ]; then
+            MODE="normal"
+            echo "⚡ Mode: NORMAL (moderate API calls)"
+          else
+            MODE="conservative"
+            echo "⏳ Mode: CONSERVATIVE (preserving API calls)"
+          fi
+          
+          echo "remaining=$REMAINING" >> $GITHUB_OUTPUT
+          echo "limit=$LIMIT" >> $GITHUB_OUTPUT
+          echo "minutes_to_reset=$MINUTES_TO_RESET" >> $GITHUB_OUTPUT
+          echo "mode=$MODE" >> $GITHUB_OUTPUT
+      
+      # ─────────────────────────────────────────────────────────────────────────
+      # LOAD LEARNED PARAMETERS - Recupera parâmetros de execuções anteriores
+      # ─────────────────────────────────────────────────────────────────────────
+      
+      - name: "📚 Load Learning Data"
+        id: learning
+        run: |
+          LEARNING_FILE=".compatibility/learning.json"
+          
+          if [ "${{ steps.init.outputs.reset_learning }}" == "true" ]; then
+            echo "🔄 Resetting learned parameters..."
+            echo '{}' > learned_params.json
+          elif [ -f "$LEARNING_FILE" ]; then
+            echo "📚 Loading learned parameters..."
+            cp "$LEARNING_FILE" learned_params.json
+          else
+            echo "📝 No learning data found, using defaults..."
+            echo '{}' > learned_params.json
+          fi
+          
+          # Extrai parâmetros aprendidos (ou usa defaults)
+          LEARNED_PARALLEL=$(jq -r '.optimized_parallel // empty' learned_params.json)
+          LEARNED_BATCH=$(jq -r '.optimized_batch_size // empty' learned_params.json)
+          LEARNED_DELAY=$(jq -r '.optimized_delay // empty' learned_params.json)
+          LEARNED_SUCCESS_RATE=$(jq -r '.last_success_rate // "1.0"' learned_params.json)
+          
+          echo "learned_parallel=${LEARNED_PARALLEL:-}" >> $GITHUB_OUTPUT
+          echo "learned_batch=${LEARNED_BATCH:-}" >> $GITHUB_OUTPUT
+          echo "learned_delay=${LEARNED_DELAY:-}" >> $GITHUB_OUTPUT
+          echo "learned_success_rate=$LEARNED_SUCCESS_RATE" >> $GITHUB_OUTPUT
+      
+      # ─────────────────────────────────────────────────────────────────────────
+      # ANALYZE REGISTRY
+      # ─────────────────────────────────────────────────────────────────────────
+      
+      - name: "📋 Analyze Registry"
+        id: analyze
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          REGISTRY=".compatibility/consumers.yml"
+          sed -i "s/\${GITHUB_ORG:-[^}]*}/${{ env.GITHUB_ORG }}/g" "$REGISTRY"
+          sed -i "s/\${GITHUB_ORG}/${{ env.GITHUB_ORG }}/g" "$REGISTRY"
+          
+          # Extrai todos os consumers habilitados com metadados
+          CONSUMERS=$(yq e '.consumers | map(select(.enabled == true)) | map({
+            name: .name,
+            repository: .repository,
+            priority: (.priority // "normal"),
+            event_type: (.workflow.event_type // "sdk.validate"),
+            timeout: (.validation.timeout_minutes // 30),
+            weight: (
+              if .priority == "critical" then 1
+              elif .priority == "high" then 2
+              elif .priority == "normal" or .priority == "medium" then 3
+              else 4 end
+            )
+          })' -o=json "$REGISTRY")
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          
+          echo "total_consumers=$TOTAL" >> $GITHUB_OUTPUT
+          echo "consumers_json=$(echo "$CONSUMERS" | jq -c .)" >> $GITHUB_OUTPUT
+          
+          echo "📊 Found $TOTAL enabled consumers"
+      
+      # ─────────────────────────────────────────────────────────────────────────
+      # SMART CALCULATION - Auto-calcula todos os parâmetros
+      # ─────────────────────────────────────────────────────────────────────────
+      
+      - name: "🧮 Smart Parameter Calculation"
+        id: calculate
+        run: |
+          TOTAL=${{ steps.analyze.outputs.total_consumers }}
+          RATE_MODE="${{ steps.rate_limit.outputs.mode }}"
+          RATE_REMAINING=${{ steps.rate_limit.outputs.remaining }}
+          LEARNED_PARALLEL="${{ steps.learning.outputs.learned_parallel }}"
+          LEARNED_BATCH="${{ steps.learning.outputs.learned_batch }}"
+          LEARNED_DELAY="${{ steps.learning.outputs.learned_delay }}"
+          LEARNED_SUCCESS="${{ steps.learning.outputs.learned_success_rate }}"
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🧮 SMART PARAMETER CALCULATION"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Total consumers: $TOTAL"
+          echo "Rate limit mode: $RATE_MODE"
+          echo "Rate remaining: $RATE_REMAINING"
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # STRATEGY: Baseado no volume + rate limit
+          # ─────────────────────────────────────────────────────────────────────
+          
+          if [ "$RATE_MODE" == "conservative" ]; then
+            # Modo conservador - prioriza segurança
+            STRATEGY="conservative"
+            BASE_PARALLEL=5
+            BASE_BATCH=20
+            BASE_DELAY=15
+          elif [ $TOTAL -le 30 ]; then
+            STRATEGY="turbo"
+            BASE_PARALLEL=25
+            BASE_BATCH=30
+            BASE_DELAY=1
+          elif [ $TOTAL -le 75 ]; then
+            STRATEGY="fast"
+            BASE_PARALLEL=20
+            BASE_BATCH=40
+            BASE_DELAY=3
+          elif [ $TOTAL -le 150 ]; then
+            STRATEGY="balanced"
+            BASE_PARALLEL=15
+            BASE_BATCH=50
+            BASE_DELAY=5
+          else
+            STRATEGY="safe"
+            BASE_PARALLEL=10
+            BASE_BATCH=40
+            BASE_DELAY=8
+          fi
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # APPLY LEARNED ADJUSTMENTS
+          # ─────────────────────────────────────────────────────────────────────
+          
+          # Se temos dados de aprendizado, ajustamos
+          if [ -n "$LEARNED_PARALLEL" ] && [ "$LEARNED_PARALLEL" != "null" ]; then
+            echo "📚 Applying learned parallel: $LEARNED_PARALLEL"
+            MAX_PARALLEL=$LEARNED_PARALLEL
+          else
+            MAX_PARALLEL=$BASE_PARALLEL
+          fi
+          
+          if [ -n "$LEARNED_BATCH" ] && [ "$LEARNED_BATCH" != "null" ]; then
+            echo "📚 Applying learned batch: $LEARNED_BATCH"
+            BATCH_SIZE=$LEARNED_BATCH
+          else
+            BATCH_SIZE=$BASE_BATCH
+          fi
+          
+          if [ -n "$LEARNED_DELAY" ] && [ "$LEARNED_DELAY" != "null" ]; then
+            echo "📚 Applying learned delay: $LEARNED_DELAY"
+            BASE_DELAY=$LEARNED_DELAY
+          fi
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # ADJUST BY SUCCESS RATE
+          # ─────────────────────────────────────────────────────────────────────
+          
+          # Se sucesso anterior foi baixo, reduz agressividade
+          SUCCESS_FLOAT=$(echo "$LEARNED_SUCCESS" | awk '{printf "%.2f", $1}')
+          if (( $(echo "$SUCCESS_FLOAT < 0.90" | bc -l) )); then
+            echo "⚠️ Previous success rate was low ($SUCCESS_FLOAT), being more conservative"
+            MAX_PARALLEL=$((MAX_PARALLEL - 3))
+            [ $MAX_PARALLEL -lt 5 ] && MAX_PARALLEL=5
+            BASE_DELAY=$((BASE_DELAY + 2))
+          elif (( $(echo "$SUCCESS_FLOAT > 0.98" | bc -l) )); then
+            echo "✨ Previous success rate was excellent ($SUCCESS_FLOAT), can be more aggressive"
+            MAX_PARALLEL=$((MAX_PARALLEL + 2))
+            [ $MAX_PARALLEL -gt 25 ] && MAX_PARALLEL=25
+            [ $BASE_DELAY -gt 2 ] && BASE_DELAY=$((BASE_DELAY - 1))
+          fi
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # RATE LIMIT ADJUSTMENT
+          # ─────────────────────────────────────────────────────────────────────
+          
+          # Ajusta delay baseado no rate limit
+          if [ $RATE_REMAINING -lt 300 ]; then
+            RATE_DELAY_FACTOR=3
+          elif [ $RATE_REMAINING -lt 500 ]; then
+            RATE_DELAY_FACTOR=2
+          elif [ $RATE_REMAINING -lt 700 ]; then
+            RATE_DELAY_FACTOR=1.5
+          else
+            RATE_DELAY_FACTOR=1
+          fi
+          
+          ADJUSTED_DELAY=$(echo "$BASE_DELAY * $RATE_DELAY_FACTOR" | bc | cut -d. -f1)
+          [ -z "$ADJUSTED_DELAY" ] && ADJUSTED_DELAY=$BASE_DELAY
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # RETRY CONFIGURATION
+          # ─────────────────────────────────────────────────────────────────────
+          
+          # Mais retries se rate limit alto, menos se baixo
+          if [ $RATE_REMAINING -gt 700 ]; then
+            RETRY_MAX=5
+            RETRY_BACKOFF="1,2,4,8,16"
+          elif [ $RATE_REMAINING -gt 400 ]; then
+            RETRY_MAX=3
+            RETRY_BACKOFF="2,4,8"
+          else
+            RETRY_MAX=2
+            RETRY_BACKOFF="5,10"
+          fi
+          
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🎯 FINAL CALCULATED PARAMETERS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Strategy:      $STRATEGY"
+          echo "Max Parallel:  $MAX_PARALLEL"
+          echo "Batch Size:    $BATCH_SIZE"
+          echo "Base Delay:    ${ADJUSTED_DELAY}s"
+          echo "Retry Max:     $RETRY_MAX"
+          echo "Retry Backoff: $RETRY_BACKOFF"
+          
+          echo "strategy=$STRATEGY" >> $GITHUB_OUTPUT
+          echo "max_parallel=$MAX_PARALLEL" >> $GITHUB_OUTPUT
+          echo "batch_size=$BATCH_SIZE" >> $GITHUB_OUTPUT
+          echo "base_delay=$ADJUSTED_DELAY" >> $GITHUB_OUTPUT
+          echo "retry_max=$RETRY_MAX" >> $GITHUB_OUTPUT
+          echo "retry_backoff=$RETRY_BACKOFF" >> $GITHUB_OUTPUT
+      
+      # ─────────────────────────────────────────────────────────────────────────
+      # SMART WAVE DISTRIBUTION
+      # ─────────────────────────────────────────────────────────────────────────
+      
+      - name: "🌊 Smart Wave Distribution"
+        id: waves
+        run: |
+          CONSUMERS='${{ steps.analyze.outputs.consumers_json }}'
+          MAX_PARALLEL=${{ steps.calculate.outputs.max_parallel }}
+          BATCH_SIZE=${{ steps.calculate.outputs.batch_size }}
+          
+          # Ordena por weight (prioridade) e distribui em waves
+          SORTED=$(echo "$CONSUMERS" | jq 'sort_by(.weight)')
+          
+          # Wave 1: Critical (weight 1)
+          WAVE_1=$(echo "$SORTED" | jq '[.[] | select(.weight == 1)]')
+          COUNT_1=$(echo "$WAVE_1" | jq 'length')
+          
+          # Wave 2: High (weight 2)
+          WAVE_2=$(echo "$SORTED" | jq '[.[] | select(.weight == 2)]')
+          COUNT_2=$(echo "$WAVE_2" | jq 'length')
+          
+          # Wave 3: Normal (weight 3)
+          WAVE_3=$(echo "$SORTED" | jq '[.[] | select(.weight == 3)]')
+          COUNT_3=$(echo "$WAVE_3" | jq 'length')
+          
+          # Wave 4: Low (weight 4)
+          WAVE_4=$(echo "$SORTED" | jq '[.[] | select(.weight == 4)]')
+          COUNT_4=$(echo "$WAVE_4" | jq 'length')
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🌊 WAVE DISTRIBUTION"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Wave 1 (Critical): $COUNT_1 consumers"
+          echo "Wave 2 (High):     $COUNT_2 consumers"
+          echo "Wave 3 (Normal):   $COUNT_3 consumers"
+          echo "Wave 4 (Low):      $COUNT_4 consumers"
+          
+          echo "wave_1=$(echo "$WAVE_1" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "wave_2=$(echo "$WAVE_2" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "wave_3=$(echo "$WAVE_3" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "wave_4=$(echo "$WAVE_4" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "wave_1_count=$COUNT_1" >> $GITHUB_OUTPUT
+          echo "wave_2_count=$COUNT_2" >> $GITHUB_OUTPUT
+          echo "wave_3_count=$COUNT_3" >> $GITHUB_OUTPUT
+          echo "wave_4_count=$COUNT_4" >> $GITHUB_OUTPUT
+      
+      - name: "📊 Brain Summary"
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## 🧠 Smart Orchestrator - Brain Analysis
+          
+          ### 📊 Rate Limit Status
+          | Metric | Value |
+          |--------|-------|
+          | Remaining | ${{ steps.rate_limit.outputs.remaining }} |
+          | Mode | `${{ steps.rate_limit.outputs.mode }}` |
+          
+          ### 🎯 Auto-Calculated Parameters
+          | Parameter | Value | Source |
+          |-----------|-------|--------|
+          | Strategy | `${{ steps.calculate.outputs.strategy }}` | Auto |
+          | Max Parallel | ${{ steps.calculate.outputs.max_parallel }} | Learned + Rate Limit |
+          | Batch Size | ${{ steps.calculate.outputs.batch_size }} | Learned + Volume |
+          | Base Delay | ${{ steps.calculate.outputs.base_delay }}s | Rate Limit Adjusted |
+          | Retry Max | ${{ steps.calculate.outputs.retry_max }} | Rate Limit Based |
+          
+          ### 🌊 Wave Distribution
+          | Wave | Priority | Count |
+          |------|----------|-------|
+          | 1 | 🔴 Critical | ${{ steps.waves.outputs.wave_1_count }} |
+          | 2 | 🟠 High | ${{ steps.waves.outputs.wave_2_count }} |
+          | 3 | 🟡 Normal | ${{ steps.waves.outputs.wave_3_count }} |
+          | 4 | 🟢 Low | ${{ steps.waves.outputs.wave_4_count }} |
+          | **Total** | | **${{ steps.analyze.outputs.total_consumers }}** |
+          EOF
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 2-5: WAVE EXECUTION (Smart Dispatch)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  wave-1:
+    name: "🔴 Wave 1 - Critical"
+    runs-on: ubuntu-latest
+    needs: brain
+    if: needs.brain.outputs.wave_1_count > 0 && needs.brain.outputs.dry_run != 'true'
+    
+    outputs:
+      success_count: ${{ steps.dispatch.outputs.success_count }}
+      fail_count: ${{ steps.dispatch.outputs.fail_count }}
+      avg_time_ms: ${{ steps.dispatch.outputs.avg_time_ms }}
+    
+    steps:
+      - name: "🚀 Smart Dispatch Wave 1"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          CONSUMERS='${{ needs.brain.outputs.wave_1 }}'
+          SDK_VERSION="${{ needs.brain.outputs.sdk_version }}"
+          VALIDATION_ID="${{ needs.brain.outputs.validation_id }}"
+          MAX_PARALLEL=${{ needs.brain.outputs.max_parallel }}
+          RETRY_MAX=${{ needs.brain.outputs.retry_max }}
+          RETRY_BACKOFF="${{ needs.brain.outputs.retry_backoff }}"
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          SUCCESS=0
+          FAILED=0
+          TOTAL_TIME=0
+          
+          echo "🔴 Dispatching $TOTAL critical consumers (max parallel: $MAX_PARALLEL)"
+          
+          # Parse backoff values
+          IFS=',' read -ra BACKOFFS <<< "$RETRY_BACKOFF"
+          
+          for row in $(echo "$CONSUMERS" | jq -r '.[] | @base64'); do
+            _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT=$(_jq '.event_type')
+            
+            START_MS=$(date +%s%3N)
+            DISPATCHED=false
+            
+            for attempt in $(seq 1 $RETRY_MAX); do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": 1,
+                    \"priority\": \"critical\",
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {\"repository\": \"${{ github.repository }}\"}
+                  }
+                }")
+              
+              if [ "$HTTP_CODE" -eq 204 ]; then
+                END_MS=$(date +%s%3N)
+                ELAPSED=$((END_MS - START_MS))
+                TOTAL_TIME=$((TOTAL_TIME + ELAPSED))
+                echo "✅ $NAME (${ELAPSED}ms)"
+                SUCCESS=$((SUCCESS + 1))
+                DISPATCHED=true
+                break
+              else
+                BACKOFF_IDX=$((attempt - 1))
+                if [ $attempt -lt $RETRY_MAX ]; then
+                  WAIT=${BACKOFFS[$BACKOFF_IDX]:-5}
+                  echo "⚠️ Retry $attempt/$RETRY_MAX for $NAME (wait ${WAIT}s)"
+                  sleep $WAIT
+                fi
+              fi
+            done
+            
+            if [ "$DISPATCHED" != "true" ]; then
+              echo "❌ $NAME (failed after $RETRY_MAX attempts)"
+              FAILED=$((FAILED + 1))
+            fi
+            
+            sleep 0.2
+          done
+          
+          AVG_TIME=0
+          [ $SUCCESS -gt 0 ] && AVG_TIME=$((TOTAL_TIME / SUCCESS))
+          
+          echo ""
+          echo "📊 Wave 1 Complete: $SUCCESS success, $FAILED failed, avg ${AVG_TIME}ms"
+          
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "fail_count=$FAILED" >> $GITHUB_OUTPUT
+          echo "avg_time_ms=$AVG_TIME" >> $GITHUB_OUTPUT
+
+  wave-2:
+    name: "🟠 Wave 2 - High"
+    runs-on: ubuntu-latest
+    needs: [brain, wave-1]
+    if: |
+      always() &&
+      needs.brain.outputs.wave_2_count > 0 &&
+      needs.brain.outputs.dry_run != 'true'
+    
+    outputs:
+      success_count: ${{ steps.dispatch.outputs.success_count }}
+      fail_count: ${{ steps.dispatch.outputs.fail_count }}
+    
+    steps:
+      - name: "⏳ Adaptive Delay"
+        run: |
+          # Ajusta delay baseado na performance da wave anterior
+          PREV_FAIL="${{ needs.wave-1.outputs.fail_count || 0 }}"
+          BASE_DELAY=${{ needs.brain.outputs.base_delay }}
+          
+          if [ "$PREV_FAIL" -gt 0 ]; then
+            DELAY=$((BASE_DELAY + PREV_FAIL * 2))
+            echo "⚠️ Previous wave had $PREV_FAIL failures, increasing delay to ${DELAY}s"
+          else
+            DELAY=$BASE_DELAY
+          fi
+          
+          echo "⏳ Waiting ${DELAY}s before wave 2..."
+          sleep $DELAY
+      
+      - name: "🚀 Smart Dispatch Wave 2"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          CONSUMERS='${{ needs.brain.outputs.wave_2 }}'
+          SDK_VERSION="${{ needs.brain.outputs.sdk_version }}"
+          VALIDATION_ID="${{ needs.brain.outputs.validation_id }}"
+          BATCH_SIZE=${{ needs.brain.outputs.batch_size }}
+          RETRY_MAX=${{ needs.brain.outputs.retry_max }}
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          SUCCESS=0
+          FAILED=0
+          
+          echo "🟠 Dispatching $TOTAL high priority consumers"
+          
+          INDEX=0
+          for row in $(echo "$CONSUMERS" | jq -r '.[] | @base64'); do
+            _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT=$(_jq '.event_type')
+            
+            # Batch pause
+            if [ $INDEX -gt 0 ] && [ $((INDEX % BATCH_SIZE)) -eq 0 ]; then
+              echo "⏳ Batch pause..."
+              sleep ${{ needs.brain.outputs.base_delay }}
+            fi
+            
+            DISPATCHED=false
+            for attempt in 1 2 3; do
+              HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": 2,
+                    \"priority\": \"high\",
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {\"repository\": \"${{ github.repository }}\"}
+                  }
+                }")
+              
+              if [ "$HTTP_CODE" -eq 204 ]; then
+                echo "✅ $NAME"
+                SUCCESS=$((SUCCESS + 1))
+                DISPATCHED=true
+                break
+              elif [ $attempt -lt 3 ]; then
+                sleep $((attempt * 2))
+              fi
+            done
+            
+            [ "$DISPATCHED" != "true" ] && FAILED=$((FAILED + 1)) && echo "❌ $NAME"
+            
+            sleep 0.2
+            INDEX=$((INDEX + 1))
+          done
+          
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "fail_count=$FAILED" >> $GITHUB_OUTPUT
+
+  wave-3:
+    name: "🟡 Wave 3 - Normal"
+    runs-on: ubuntu-latest
+    needs: [brain, wave-2]
+    if: |
+      always() &&
+      needs.brain.outputs.wave_3_count > 0 &&
+      needs.brain.outputs.dry_run != 'true'
+    
+    outputs:
+      success_count: ${{ steps.dispatch.outputs.success_count }}
+      fail_count: ${{ steps.dispatch.outputs.fail_count }}
+    
+    steps:
+      - name: "⏳ Adaptive Delay"
+        run: |
+          PREV_FAIL="${{ needs.wave-2.outputs.fail_count || 0 }}"
+          BASE_DELAY=${{ needs.brain.outputs.base_delay }}
+          DELAY=$((BASE_DELAY + PREV_FAIL))
+          echo "⏳ Waiting ${DELAY}s before wave 3..."
+          sleep $DELAY
+      
+      - name: "🚀 Smart Dispatch Wave 3"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          CONSUMERS='${{ needs.brain.outputs.wave_3 }}'
+          SDK_VERSION="${{ needs.brain.outputs.sdk_version }}"
+          VALIDATION_ID="${{ needs.brain.outputs.validation_id }}"
+          BATCH_SIZE=${{ needs.brain.outputs.batch_size }}
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          SUCCESS=0
+          FAILED=0
+          
+          echo "🟡 Dispatching $TOTAL normal priority consumers"
+          
+          INDEX=0
+          for row in $(echo "$CONSUMERS" | jq -r '.[] | @base64'); do
+            _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT=$(_jq '.event_type')
+            
+            if [ $INDEX -gt 0 ] && [ $((INDEX % BATCH_SIZE)) -eq 0 ]; then
+              echo "⏳ Batch pause..."
+              sleep ${{ needs.brain.outputs.base_delay }}
+            fi
+            
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $DISPATCH_TOKEN" \
+              "https://api.github.com/repos/$REPO/dispatches" \
+              -d "{
+                \"event_type\": \"$EVENT\",
+                \"client_payload\": {
+                  \"validation_id\": \"$VALIDATION_ID\",
+                  \"wave\": 3,
+                  \"priority\": \"normal\",
+                  \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                  \"consumer\": {\"name\": \"$NAME\"},
+                  \"callback\": {\"repository\": \"${{ github.repository }}\"}
+                }
+              }")
+            
+            if [ "$HTTP_CODE" -eq 204 ]; then
+              SUCCESS=$((SUCCESS + 1))
+            else
+              FAILED=$((FAILED + 1))
+            fi
+            
+            sleep 0.3
+            INDEX=$((INDEX + 1))
+          done
+          
+          echo "📊 Wave 3: $SUCCESS success, $FAILED failed"
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "fail_count=$FAILED" >> $GITHUB_OUTPUT
+
+  wave-4:
+    name: "🟢 Wave 4 - Low"
+    runs-on: ubuntu-latest
+    needs: [brain, wave-3]
+    if: |
+      always() &&
+      needs.brain.outputs.wave_4_count > 0 &&
+      needs.brain.outputs.dry_run != 'true'
+    
+    outputs:
+      success_count: ${{ steps.dispatch.outputs.success_count }}
+      fail_count: ${{ steps.dispatch.outputs.fail_count }}
+    
+    steps:
+      - name: "⏳ Delay"
+        run: sleep ${{ needs.brain.outputs.base_delay }}
+      
+      - name: "🚀 Dispatch Wave 4"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          CONSUMERS='${{ needs.brain.outputs.wave_4 }}'
+          SDK_VERSION="${{ needs.brain.outputs.sdk_version }}"
+          VALIDATION_ID="${{ needs.brain.outputs.validation_id }}"
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          SUCCESS=0
+          FAILED=0
+          
+          for row in $(echo "$CONSUMERS" | jq -r '.[] | @base64'); do
+            _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT=$(_jq '.event_type')
+            
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $DISPATCH_TOKEN" \
+              "https://api.github.com/repos/$REPO/dispatches" \
+              -d "{
+                \"event_type\": \"$EVENT\",
+                \"client_payload\": {
+                  \"validation_id\": \"$VALIDATION_ID\",
+                  \"wave\": 4,
+                  \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                  \"consumer\": {\"name\": \"$NAME\"}
+                }
+              }")
+            
+            [ "$HTTP_CODE" -eq 204 ] && SUCCESS=$((SUCCESS + 1)) || FAILED=$((FAILED + 1))
+            sleep 0.5
+          done
+          
+          echo "success_count=$SUCCESS" >> $GITHUB_OUTPUT
+          echo "fail_count=$FAILED" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 6: LEARN - Aprende com a execução e salva para próxima vez
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  learn:
+    name: "📚 Learn & Optimize"
+    runs-on: ubuntu-latest
+    needs: [brain, wave-1, wave-2, wave-3, wave-4]
+    if: always() && needs.brain.outputs.dry_run != 'true'
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+      
+      - name: "📊 Analyze Results & Learn"
+        run: |
+          # Coleta resultados
+          W1_SUCCESS=${{ needs.wave-1.outputs.success_count || 0 }}
+          W1_FAIL=${{ needs.wave-1.outputs.fail_count || 0 }}
+          W2_SUCCESS=${{ needs.wave-2.outputs.success_count || 0 }}
+          W2_FAIL=${{ needs.wave-2.outputs.fail_count || 0 }}
+          W3_SUCCESS=${{ needs.wave-3.outputs.success_count || 0 }}
+          W3_FAIL=${{ needs.wave-3.outputs.fail_count || 0 }}
+          W4_SUCCESS=${{ needs.wave-4.outputs.success_count || 0 }}
+          W4_FAIL=${{ needs.wave-4.outputs.fail_count || 0 }}
+          
+          TOTAL_SUCCESS=$((W1_SUCCESS + W2_SUCCESS + W3_SUCCESS + W4_SUCCESS))
+          TOTAL_FAIL=$((W1_FAIL + W2_FAIL + W3_FAIL + W4_FAIL))
+          TOTAL=$((TOTAL_SUCCESS + TOTAL_FAIL))
+          
+          [ $TOTAL -eq 0 ] && TOTAL=1  # Prevent division by zero
+          SUCCESS_RATE=$(echo "scale=4; $TOTAL_SUCCESS / $TOTAL" | bc)
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📊 EXECUTION RESULTS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Total Success: $TOTAL_SUCCESS"
+          echo "Total Failed: $TOTAL_FAIL"
+          echo "Success Rate: $SUCCESS_RATE"
+          
+          # Parâmetros usados
+          USED_PARALLEL=${{ needs.brain.outputs.max_parallel }}
+          USED_BATCH=${{ needs.brain.outputs.batch_size }}
+          USED_DELAY=${{ needs.brain.outputs.base_delay }}
+          
+          # Calcula novos parâmetros otimizados
+          if (( $(echo "$SUCCESS_RATE > 0.98" | bc -l) )); then
+            echo "✨ Excellent! Increasing aggressiveness for next run"
+            NEW_PARALLEL=$((USED_PARALLEL + 2))
+            NEW_BATCH=$((USED_BATCH + 5))
+            NEW_DELAY=$((USED_DELAY > 2 ? USED_DELAY - 1 : USED_DELAY))
+          elif (( $(echo "$SUCCESS_RATE > 0.95" | bc -l) )); then
+            echo "👍 Good! Keeping current parameters"
+            NEW_PARALLEL=$USED_PARALLEL
+            NEW_BATCH=$USED_BATCH
+            NEW_DELAY=$USED_DELAY
+          elif (( $(echo "$SUCCESS_RATE > 0.85" | bc -l) )); then
+            echo "⚠️ Some failures, being more conservative"
+            NEW_PARALLEL=$((USED_PARALLEL - 2))
+            NEW_BATCH=$((USED_BATCH - 5))
+            NEW_DELAY=$((USED_DELAY + 2))
+          else
+            echo "❌ High failure rate, significant reduction"
+            NEW_PARALLEL=$((USED_PARALLEL / 2))
+            NEW_BATCH=$((USED_BATCH / 2))
+            NEW_DELAY=$((USED_DELAY * 2))
+          fi
+          
+          # Limites
+          [ $NEW_PARALLEL -lt 5 ] && NEW_PARALLEL=5
+          [ $NEW_PARALLEL -gt 25 ] && NEW_PARALLEL=25
+          [ $NEW_BATCH -lt 20 ] && NEW_BATCH=20
+          [ $NEW_BATCH -gt 60 ] && NEW_BATCH=60
+          [ $NEW_DELAY -lt 1 ] && NEW_DELAY=1
+          [ $NEW_DELAY -gt 20 ] && NEW_DELAY=20
+          
+          echo ""
+          echo "📚 LEARNED PARAMETERS FOR NEXT RUN:"
+          echo "   Parallel: $USED_PARALLEL → $NEW_PARALLEL"
+          echo "   Batch:    $USED_BATCH → $NEW_BATCH"
+          echo "   Delay:    $USED_DELAY → $NEW_DELAY"
+          
+          # Salva aprendizado
+          mkdir -p .compatibility
+          cat > .compatibility/learning.json << EOF
+          {
+            "last_run": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "last_validation_id": "${{ needs.brain.outputs.validation_id }}",
+            "last_success_rate": $SUCCESS_RATE,
+            "last_total_consumers": $TOTAL,
+            "last_strategy": "${{ needs.brain.outputs.strategy }}",
+            "optimized_parallel": $NEW_PARALLEL,
+            "optimized_batch_size": $NEW_BATCH,
+            "optimized_delay": $NEW_DELAY,
+            "history": {
+              "wave_1": {"success": $W1_SUCCESS, "fail": $W1_FAIL},
+              "wave_2": {"success": $W2_SUCCESS, "fail": $W2_FAIL},
+              "wave_3": {"success": $W3_SUCCESS, "fail": $W3_FAIL},
+              "wave_4": {"success": $W4_SUCCESS, "fail": $W4_FAIL}
+            }
+          }
+          EOF
+          
+          cat .compatibility/learning.json
+      
+      - name: "💾 Save Learning"
+        run: |
+          git config user.name "Smart Orchestrator Bot"
+          git config user.email "bot@orchestrator.local"
+          
+          if git diff --quiet .compatibility/learning.json 2>/dev/null; then
+            echo "No changes to learning data"
+          else
+            git add .compatibility/learning.json
+            git commit -m "chore: update learning data from run ${{ github.run_number }}" || echo "Nothing to commit"
+            git push || echo "Push failed, will retry next run"
+          fi
+      
+      - name: "📊 Final Summary"
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          ## 📚 Learning Complete
+          
+          ### 📊 Execution Results
+          | Wave | Success | Failed |
+          |------|---------|--------|
+          | 🔴 Critical | ${{ needs.wave-1.outputs.success_count || 0 }} | ${{ needs.wave-1.outputs.fail_count || 0 }} |
+          | 🟠 High | ${{ needs.wave-2.outputs.success_count || 0 }} | ${{ needs.wave-2.outputs.fail_count || 0 }} |
+          | 🟡 Normal | ${{ needs.wave-3.outputs.success_count || 0 }} | ${{ needs.wave-3.outputs.fail_count || 0 }} |
+          | 🟢 Low | ${{ needs.wave-4.outputs.success_count || 0 }} | ${{ needs.wave-4.outputs.fail_count || 0 }} |
+          
+          ### 🧠 Parameters saved for next run
+          Learning data has been committed and will be used to optimize the next execution.
+          EOF

@@ -1,0 +1,11 @@
+{
+  "last_run": null,
+  "last_validation_id": null,
+  "last_success_rate": 1.0,
+  "last_total_consumers": 0,
+  "last_strategy": null,
+  "optimized_parallel": null,
+  "optimized_batch_size": null,
+  "optimized_delay": null,
+  "history": {}
+}
