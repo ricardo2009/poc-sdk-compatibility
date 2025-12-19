@@ -1,0 +1,337 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧪 E2E TEST - FULL FLOW TEST
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Testa o fluxo completo: SDK → Orchestrator → Mini-apps
+#
+# Este workflow:
+#   1. Simula uma release do SDK
+#   2. Dispara o orchestrator
+#   3. Valida os consumers reais (miniapp-pix-poc, miniapp-pagamentos-poc)
+#   4. Coleta resultados
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "🧪 E2E Test - Full Flow"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sdk_version:
+        description: 'SDK version to simulate'
+        required: true
+        default: '1.0.0'
+      change_type:
+        description: 'Change type'
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+        default: 'patch'
+      dry_run:
+        description: 'Dry run (do not dispatch to consumers)'
+        type: boolean
+        default: false
+
+env:
+  GITHUB_ORG: ricardo2009
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STEP 1: PREPARE TEST
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  prepare:
+    name: "📋 Prepare Test"
+    runs-on: ubuntu-latest
+    
+    outputs:
+      event_id: ${{ steps.event.outputs.id }}
+      consumers_json: ${{ steps.consumers.outputs.json }}
+      consumers_count: ${{ steps.consumers.outputs.count }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: "🆔 Generate Event ID"
+        id: event
+        run: |
+          EVENT_ID="e2e-$(date +%Y%m%d%H%M%S)-$(openssl rand -hex 4)"
+          echo "id=$EVENT_ID" >> $GITHUB_OUTPUT
+          echo "📋 Event ID: $EVENT_ID"
+      
+      - name: "📖 Load Consumers"
+        id: consumers
+        run: |
+          # Install yq
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          # Load enabled consumers
+          CONSUMERS=$(yq -o=json '.consumers | map(select(.enabled == true))' .compatibility/consumers.yml)
+          COUNT=$(echo "$CONSUMERS" | jq 'length')
+          
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📋 LOADED CONSUMERS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "$CONSUMERS" | jq -r '.[] | "  • \(.name) [\(.priority)] → \(.repository)"'
+          echo ""
+          echo "Total: $COUNT consumers"
+          
+          # Output
+          echo "json=$(echo "$CONSUMERS" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+      
+      - name: "📊 Test Summary - Setup"
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🧪 E2E Test - Setup
+          
+          | Parameter | Value |
+          |-----------|-------|
+          | Event ID | \`${{ steps.event.outputs.id }}\` |
+          | SDK Version | ${{ github.event.inputs.sdk_version }} |
+          | Change Type | ${{ github.event.inputs.change_type }} |
+          | Dry Run | ${{ github.event.inputs.dry_run }} |
+          | Consumers | ${{ steps.consumers.outputs.count }} |
+          
+          ### Consumers to Test
+          $(echo '${{ steps.consumers.outputs.json }}' | jq -r '.[] | "- **\(.name)** (\(.priority)) → `\(.repository)`"')
+          EOF
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STEP 2: CHECK API RATE LIMIT
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  rate-check:
+    name: "🔐 Check Rate Limit"
+    runs-on: ubuntu-latest
+    needs: prepare
+    
+    outputs:
+      remaining: ${{ steps.check.outputs.remaining }}
+      can_proceed: ${{ steps.check.outputs.can_proceed }}
+    
+    steps:
+      - name: "🔐 Check GitHub API Rate Limit"
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RATE=$(curl -s -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/rate_limit)
+          
+          REMAINING=$(echo "$RATE" | jq '.rate.remaining')
+          LIMIT=$(echo "$RATE" | jq '.rate.limit')
+          RESET=$(echo "$RATE" | jq '.rate.reset')
+          RESET_TIME=$(date -d @$RESET "+%H:%M:%S")
+          
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🔐 RATE LIMIT STATUS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Remaining: $REMAINING / $LIMIT"
+          echo "Resets at: $RESET_TIME"
+          
+          # Need at least 50 calls for E2E test
+          if [ $REMAINING -lt 50 ]; then
+            CAN_PROCEED="false"
+            echo ""
+            echo "❌ Insufficient rate limit for E2E test"
+          else
+            CAN_PROCEED="true"
+            echo ""
+            echo "✅ Rate limit OK"
+          fi
+          
+          echo "remaining=$REMAINING" >> $GITHUB_OUTPUT
+          echo "can_proceed=$CAN_PROCEED" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STEP 3: DISPATCH TO CONSUMERS
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  dispatch:
+    name: "🚀 Dispatch - ${{ matrix.consumer.name }}"
+    runs-on: ubuntu-latest
+    needs: [prepare, rate-check]
+    if: needs.rate-check.outputs.can_proceed == 'true'
+    
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        consumer: ${{ fromJSON(needs.prepare.outputs.consumers_json) }}
+    
+    steps:
+      - name: "🚀 Dispatch to ${{ matrix.consumer.name }}"
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          CONSUMER_NAME="${{ matrix.consumer.name }}"
+          CONSUMER_REPO="${{ matrix.consumer.repository }}"
+          EVENT_TYPE="${{ matrix.consumer.workflow.event_type }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+          
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🚀 DISPATCHING TO: $CONSUMER_NAME"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Repository: $CONSUMER_REPO"
+          echo "Event Type: $EVENT_TYPE"
+          echo ""
+          
+          if [ "$DRY_RUN" == "true" ]; then
+            echo "🏃 DRY RUN - Skipping actual dispatch"
+            echo "dispatched=false" >> $GITHUB_OUTPUT
+            echo "status=skipped" >> $GITHUB_OUTPUT
+          else
+            # Check if PAT_TOKEN is set
+            if [ -z "$GH_TOKEN" ]; then
+              echo "❌ PAT_TOKEN secret not set!"
+              echo "   Please add a Personal Access Token with repo scope"
+              echo "dispatched=false" >> $GITHUB_OUTPUT
+              echo "status=no_token" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            # Build payload
+            PAYLOAD=$(cat << PAYLOAD_END
+          {
+            "event_type": "$EVENT_TYPE",
+            "client_payload": {
+              "event": {
+                "id": "${{ needs.prepare.outputs.event_id }}",
+                "type": "e2e-test",
+                "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              },
+              "sdk": {
+                "version": "${{ github.event.inputs.sdk_version }}",
+                "change_type": "${{ github.event.inputs.change_type }}",
+                "is_breaking": false,
+                "repository": "${{ env.GITHUB_ORG }}/superapp-sdk-poc"
+              },
+              "orchestrator": {
+                "repo": "${{ github.repository }}",
+                "run_id": "${{ github.run_id }}"
+              },
+              "rules": {
+                "auto_merge": ${{ matrix.consumer.config.auto_merge_patch }},
+                "require_tests": ${{ matrix.consumer.config.require_tests }}
+              }
+            }
+          }
+          PAYLOAD_END
+          )
+            
+            echo "📤 Sending payload..."
+            echo "$PAYLOAD" | jq .
+            
+            # Dispatch event
+            RESPONSE=$(curl -s -w "\n%{http_code}" \
+              -X POST \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/$CONSUMER_REPO/dispatches" \
+              -d "$PAYLOAD")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+            BODY=$(echo "$RESPONSE" | head -n -1)
+            
+            if [ "$HTTP_CODE" == "204" ] || [ "$HTTP_CODE" == "200" ]; then
+              echo ""
+              echo "✅ Successfully dispatched to $CONSUMER_NAME"
+              echo "dispatched=true" >> $GITHUB_OUTPUT
+              echo "status=success" >> $GITHUB_OUTPUT
+            else
+              echo ""
+              echo "❌ Failed to dispatch (HTTP $HTTP_CODE)"
+              echo "$BODY"
+              echo "dispatched=false" >> $GITHUB_OUTPUT
+              echo "status=failed" >> $GITHUB_OUTPUT
+            fi
+          fi
+      
+      - name: "📊 Dispatch Result"
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ### 📤 Dispatch: ${{ matrix.consumer.name }}
+          
+          | Field | Value |
+          |-------|-------|
+          | Repository | \`${{ matrix.consumer.repository }}\` |
+          | Priority | ${{ matrix.consumer.priority }} |
+          | Status | ${{ steps.dispatch.outputs.status || 'unknown' }} |
+          EOF
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # STEP 4: SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  summary:
+    name: "📊 Test Summary"
+    runs-on: ubuntu-latest
+    needs: [prepare, rate-check, dispatch]
+    if: always()
+    
+    steps:
+      - name: "📊 Generate Final Summary"
+        run: |
+          cat << 'EOF' >> $GITHUB_STEP_SUMMARY
+          
+          ---
+          
+          ## 🧪 E2E Test Complete
+          
+          ### Flow Executed
+          
+          ```
+          ┌─────────────────────────────────────────────────────────────────┐
+          │                        E2E TEST FLOW                            │
+          └─────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+          ┌─────────────────────────────────────────────────────────────────┐
+          │  📋 PREPARE                                                      │
+          │  • Generated Event ID                                           │
+          │  • Loaded consumers from registry                               │
+          └─────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+          ┌─────────────────────────────────────────────────────────────────┐
+          │  🔐 RATE CHECK                                                   │
+          │  • Verified API rate limit                                      │
+          │  • Confirmed capacity for dispatch                              │
+          └─────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+          ┌─────────────────────────────────────────────────────────────────┐
+          │  🚀 DISPATCH                                                     │
+          │  • Sent sdk.validate events to consumers                        │
+          │  • Parallel dispatch (max 2)                                    │
+          └─────────────────────────────────────────────────────────────────┘
+                                       │
+                                       ▼
+          ┌─────────────────────────────────────────────────────────────────┐
+          │  ✅ CONSUMERS EXECUTING                                          │
+          │  • miniapp-pix-poc → consumer-validate.yml                      │
+          │  • miniapp-pagamentos-poc → consumer-validate.yml               │
+          └─────────────────────────────────────────────────────────────────┘
+          ```
+          
+          ### Next Steps
+          
+          1. Check consumer repositories for workflow execution:
+             - [miniapp-pix-poc Actions](https://github.com/ricardo2009/miniapp-pix-poc/actions)
+             - [miniapp-pagamentos-poc Actions](https://github.com/ricardo2009/miniapp-pagamentos-poc/actions)
+          
+          2. Verify the `consumer-validate.yml` workflow was triggered
+          
+          3. Check for any PRs created by the validation process
+          
+          EOF

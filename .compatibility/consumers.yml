@@ -1,206 +1,114 @@
 # ═══════════════════════════════════════════════════════════════════════════════
-# 📋 CONSUMER REGISTRY
+# 📋 CONSUMER REGISTRY - POC REAL
 # ═══════════════════════════════════════════════════════════════════════════════
 #
-# Este arquivo define todos os consumidores do SDK que serão notificados
-# automaticamente quando uma nova versão for liberada.
-#
-# IMPORTANTE: O SDK (producer) NÃO conhece os consumers.
-#             Apenas o Orchestrator conhece este registry.
+# Repositórios POC REAIS para teste de compatibilidade SDK
 #
 # ═══════════════════════════════════════════════════════════════════════════════
-
-# ─────────────────────────────────────────────────────────────────────────────────
-# METADATA
-# ─────────────────────────────────────────────────────────────────────────────────
 
 registry:
-  version: "1.0.0"
+  version: "2.0.0"
   updated_at: "2024-12-18"
   updated_by: "platform-team"
+  environment: "poc"
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# CONSUMERS
+# SDK PRODUCER (para referência)
 # ─────────────────────────────────────────────────────────────────────────────────
-#
-# Cada consumer representa um mini-app que depende do SDK.
-#
-# Campos:
-#   - name: Identificador único do consumer
-#   - repository: Repositório GitHub (org/repo)
-#   - priority: critical | high | medium | low
-#   - enabled: true/false para ativar/desativar
-#   - team: Time responsável
-#   - workflow: Nome do workflow que será disparado
-#   - config: Configurações específicas do consumer
-#
+
+sdk:
+  name: "superapp-sdk-poc"
+  repository: "ricardo2009/superapp-sdk-poc"
+  package: "@ricardo2009/superapp-sdk"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CONSUMERS - MINI-APPS POC
 # ─────────────────────────────────────────────────────────────────────────────────
 
 consumers:
   # ═══════════════════════════════════════════════════════════════════════════════
-  # EXEMPLO 1: Mini-App PIX
+  # MINI-APP PIX POC
   # ═══════════════════════════════════════════════════════════════════════════════
-  - name: "miniapp-pix"
-    display_name: "Mini-App PIX"
-    description: "Módulo de transferências PIX"
-    repository: "${GITHUB_ORG:-ricardo2009}/miniapp-pix"
+  - name: "miniapp-pix-poc"
+    display_name: "Mini-App PIX (POC)"
+    description: "Módulo de transferências PIX - POC"
+    repository: "ricardo2009/miniapp-pix-poc"
     priority: "critical"
+    weight: 1
     enabled: true
     team: "squad-pix"
     contacts:
-      - "pix-team@example.com"
-    
-    # Workflow que será disparado neste consumer
+      - "ricardolima@email.com"
     workflow:
       file: "consumer-validate.yml"
       event_type: "sdk.validate"
-    
-    # Configurações específicas
     config:
-      # Diretório onde o SDK é usado
-      sdk_path: "."
-      
-      # Arquivo package.json
-      package_json: "package.json"
-      
-      # Testes a executar
-      test_command: "npm test"
-      
-      # Branch base para PRs
-      base_branch: "main"
-      
-      # Auto-merge habilitado?
-      auto_merge: true
-    
-    # Tags para filtros
+      auto_merge_patch: true
+      auto_merge_minor: true
+      auto_merge_major: false
+      require_tests: true
+      require_build: true
     tags:
-      - "payments"
-      - "critical-path"
-      - "production"
+      - "pix"
+      - "transfers"
+      - "poc"
 
   # ═══════════════════════════════════════════════════════════════════════════════
-  # EXEMPLO 2: Mini-App Pagamentos
+  # MINI-APP PAGAMENTOS POC
   # ═══════════════════════════════════════════════════════════════════════════════
-  - name: "miniapp-pagamentos"
-    display_name: "Mini-App Pagamentos"
-    description: "Módulo de pagamentos de contas"
-    repository: "${GITHUB_ORG:-ricardo2009}/miniapp-pagamentos"
+  - name: "miniapp-pagamentos-poc"
+    display_name: "Mini-App Pagamentos (POC)"
+    description: "Módulo de pagamentos - POC"
+    repository: "ricardo2009/miniapp-pagamentos-poc"
     priority: "high"
+    weight: 2
     enabled: true
     team: "squad-pagamentos"
     contacts:
-      - "pagamentos-team@example.com"
-    
+      - "ricardolima@email.com"
     workflow:
       file: "consumer-validate.yml"
       event_type: "sdk.validate"
-    
     config:
-      sdk_path: "."
-      package_json: "package.json"
-      test_command: "npm test"
-      base_branch: "main"
-      auto_merge: true
-    
+      auto_merge_patch: true
+      auto_merge_minor: true
+      auto_merge_major: false
+      require_tests: true
+      require_build: true
     tags:
       - "payments"
-      - "production"
-
-  # ═══════════════════════════════════════════════════════════════════════════════
-  # TEMPLATE: Copie este bloco para adicionar novos consumers
-  # ═══════════════════════════════════════════════════════════════════════════════
-  # - name: "miniapp-nome"
-  #   display_name: "Mini-App Nome"
-  #   description: "Descrição do módulo"
-  #   repository: "${GITHUB_ORG:-ricardo2009}/miniapp-nome"
-  #   priority: "medium"  # critical | high | medium | low
-  #   enabled: true
-  #   team: "squad-nome"
-  #   contacts:
-  #     - "team@example.com"
-  #   
-  #   workflow:
-  #     file: "consumer-validate.yml"
-  #     event_type: "sdk.validate"
-  #   
-  #   config:
-  #     sdk_path: "."
-  #     package_json: "package.json"
-  #     test_command: "npm test"
-  #     base_branch: "main"
-  #     auto_merge: false
-  #   
-  #   tags:
-  #     - "tag1"
-  #     - "tag2"
+      - "boleto"
+      - "poc"
 
 # ─────────────────────────────────────────────────────────────────────────────────
-# GRUPOS DE CONSUMERS
-# ─────────────────────────────────────────────────────────────────────────────────
-#
-# Permite agrupar consumers para operações em lote.
-#
+# REGRAS GLOBAIS
 # ─────────────────────────────────────────────────────────────────────────────────
 
-groups:
-  # Grupo de consumers críticos (validar primeiro)
-  critical:
-    description: "Consumers que devem ser validados primeiro"
-    filter:
-      priority: "critical"
-    validation_order: 1
+rules:
+  auto_merge:
+    patch: true
+    minor: true
+    major: false
   
-  # Grupo de pagamentos
-  payments:
-    description: "Todos os consumers relacionados a pagamentos"
-    filter:
-      tags:
-        includes: ["payments"]
-    validation_order: 2
+  priority_order:
+    - critical
+    - high
+    - normal
+    - low
   
-  # Grupo de produção
-  production:
-    description: "Consumers em produção"
-    filter:
-      tags:
-        includes: ["production"]
-    require_all_pass: true
+  timeouts:
+    validation: 600
+    total: 3600
+  
+  retry:
+    max_attempts: 3
+    backoff: "exponential"
+    initial_delay: 60
 
-# ─────────────────────────────────────────────────────────────────────────────────
-# CONFIGURAÇÃO DE DISPATCH
-# ─────────────────────────────────────────────────────────────────────────────────
-
-dispatch:
-  # Estratégia de dispatch
-  strategy: "parallel"  # parallel | sequential | priority-based
-  
-  # Delay entre dispatches (para rate limiting)
-  delay_between_ms: 1000
-  
-  # Máximo de dispatches simultâneos
-  max_concurrent: 10
-  
-  # Timeout para aguardar todos os consumers
-  aggregate_timeout_minutes: 60
-
-# ─────────────────────────────────────────────────────────────────────────────────
-# VALIDAÇÃO DO REGISTRY
-# ─────────────────────────────────────────────────────────────────────────────────
-
-validation:
-  # Schema version para validação
-  schema_version: "1.0"
-  
-  # Campos obrigatórios para cada consumer
-  required_fields:
-    - "name"
-    - "repository"
-    - "priority"
-    - "enabled"
-  
-  # Valores válidos para priority
-  valid_priorities:
-    - "critical"
-    - "high"
-    - "medium"
-    - "low"
+notifications:
+  github:
+    enabled: true
+    create_issues: true
+    labels:
+      - "sdk-compatibility"
+      - "automated"

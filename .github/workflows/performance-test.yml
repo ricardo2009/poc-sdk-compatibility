@@ -1,0 +1,443 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🧪 PERFORMANCE TEST SUITE
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Testa o sistema com diferentes volumes de consumers simulados
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "🧪 Performance Test"
+
+on:
+  workflow_dispatch:
+    inputs:
+      test_scenario:
+        description: 'Test scenario'
+        type: choice
+        options:
+          - small (10 consumers)
+          - medium (50 consumers)
+          - large (100 consumers)
+          - stress (200 consumers)
+          - all
+        default: 'small (10 consumers)'
+      dry_run:
+        description: 'Dry run (simulate only)'
+        type: boolean
+        default: true
+
+env:
+  GITHUB_ORG: ${{ vars.GITHUB_ORG || github.repository_owner }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # GENERATE TEST DATA
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  setup:
+    name: "🔧 Setup Test"
+    runs-on: ubuntu-latest
+    
+    outputs:
+      scenarios: ${{ steps.parse.outputs.scenarios }}
+    
+    steps:
+      - name: "📋 Parse Scenarios"
+        id: parse
+        run: |
+          INPUT="${{ github.event.inputs.test_scenario }}"
+          
+          if [ "$INPUT" == "all" ]; then
+            SCENARIOS='["small","medium","large","stress"]'
+          elif [[ "$INPUT" == *"small"* ]]; then
+            SCENARIOS='["small"]'
+          elif [[ "$INPUT" == *"medium"* ]]; then
+            SCENARIOS='["medium"]'
+          elif [[ "$INPUT" == *"large"* ]]; then
+            SCENARIOS='["large"]'
+          elif [[ "$INPUT" == *"stress"* ]]; then
+            SCENARIOS='["stress"]'
+          else
+            SCENARIOS='["small"]'
+          fi
+          
+          echo "scenarios=$SCENARIOS" >> $GITHUB_OUTPUT
+          echo "📋 Running scenarios: $SCENARIOS"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # PERFORMANCE TESTS
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  test:
+    name: "🧪 Test - ${{ matrix.scenario }}"
+    runs-on: ubuntu-latest
+    needs: setup
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: ${{ fromJSON(needs.setup.outputs.scenarios) }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: "🔧 Setup"
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+      
+      - name: "📊 Generate Test Consumers"
+        id: generate
+        run: |
+          SCENARIO="${{ matrix.scenario }}"
+          
+          case $SCENARIO in
+            "small")  COUNT=10 ;;
+            "medium") COUNT=50 ;;
+            "large")  COUNT=100 ;;
+            "stress") COUNT=200 ;;
+            *)        COUNT=10 ;;
+          esac
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🧪 GENERATING $COUNT TEST CONSUMERS"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Gera consumers de teste
+          CONSUMERS="["
+          
+          for i in $(seq 1 $COUNT); do
+            # Distribui prioridades: 10% critical, 20% high, 50% normal, 20% low
+            RAND=$((RANDOM % 100))
+            if [ $RAND -lt 10 ]; then
+              PRIORITY="critical"
+              WEIGHT=1
+            elif [ $RAND -lt 30 ]; then
+              PRIORITY="high"
+              WEIGHT=2
+            elif [ $RAND -lt 80 ]; then
+              PRIORITY="normal"
+              WEIGHT=3
+            else
+              PRIORITY="low"
+              WEIGHT=4
+            fi
+            
+            CONSUMER="{\"name\":\"test-app-$i\",\"repository\":\"${{ env.GITHUB_ORG }}/test-app-$i\",\"priority\":\"$PRIORITY\",\"weight\":$WEIGHT,\"event_type\":\"sdk.validate\"}"
+            
+            if [ $i -eq 1 ]; then
+              CONSUMERS="$CONSUMERS$CONSUMER"
+            else
+              CONSUMERS="$CONSUMERS,$CONSUMER"
+            fi
+          done
+          
+          CONSUMERS="$CONSUMERS]"
+          
+          # Conta por prioridade
+          CRITICAL=$(echo "$CONSUMERS" | jq '[.[] | select(.priority == "critical")] | length')
+          HIGH=$(echo "$CONSUMERS" | jq '[.[] | select(.priority == "high")] | length')
+          NORMAL=$(echo "$CONSUMERS" | jq '[.[] | select(.priority == "normal")] | length')
+          LOW=$(echo "$CONSUMERS" | jq '[.[] | select(.priority == "low")] | length')
+          
+          echo ""
+          echo "📊 Distribution:"
+          echo "   🔴 Critical: $CRITICAL"
+          echo "   🟠 High:     $HIGH"
+          echo "   🟡 Normal:   $NORMAL"
+          echo "   🟢 Low:      $LOW"
+          echo "   ─────────────────────"
+          echo "   Total:       $COUNT"
+          
+          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          echo "consumers=$(echo "$CONSUMERS" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
+          echo "high=$HIGH" >> $GITHUB_OUTPUT
+          echo "normal=$NORMAL" >> $GITHUB_OUTPUT
+          echo "low=$LOW" >> $GITHUB_OUTPUT
+      
+      - name: "🧠 Test Brain Analysis"
+        id: brain
+        run: |
+          CONSUMERS='${{ steps.generate.outputs.consumers }}'
+          TOTAL=${{ steps.generate.outputs.count }}
+          
+          START_TIME=$(date +%s%3N)
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🧠 BRAIN ANALYSIS PERFORMANCE TEST"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Simula rate limit (assume 800 remaining)
+          RATE_REMAINING=800
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # STRATEGY CALCULATION
+          # ─────────────────────────────────────────────────────────────────────
+          
+          if [ $RATE_REMAINING -lt 300 ]; then
+            STRATEGY="conservative"
+            BASE_PARALLEL=5
+            BASE_BATCH=20
+            BASE_DELAY=15
+          elif [ $TOTAL -le 30 ]; then
+            STRATEGY="turbo"
+            BASE_PARALLEL=25
+            BASE_BATCH=30
+            BASE_DELAY=1
+          elif [ $TOTAL -le 75 ]; then
+            STRATEGY="fast"
+            BASE_PARALLEL=20
+            BASE_BATCH=40
+            BASE_DELAY=3
+          elif [ $TOTAL -le 150 ]; then
+            STRATEGY="balanced"
+            BASE_PARALLEL=15
+            BASE_BATCH=50
+            BASE_DELAY=5
+          else
+            STRATEGY="safe"
+            BASE_PARALLEL=10
+            BASE_BATCH=40
+            BASE_DELAY=8
+          fi
+          
+          # ─────────────────────────────────────────────────────────────────────
+          # WAVE DISTRIBUTION
+          # ─────────────────────────────────────────────────────────────────────
+          
+          WAVE_1=$(echo "$CONSUMERS" | jq '[.[] | select(.weight == 1)]')
+          WAVE_2=$(echo "$CONSUMERS" | jq '[.[] | select(.weight == 2)]')
+          WAVE_3=$(echo "$CONSUMERS" | jq '[.[] | select(.weight == 3)]')
+          WAVE_4=$(echo "$CONSUMERS" | jq '[.[] | select(.weight == 4)]')
+          
+          W1_COUNT=$(echo "$WAVE_1" | jq 'length')
+          W2_COUNT=$(echo "$WAVE_2" | jq 'length')
+          W3_COUNT=$(echo "$WAVE_3" | jq 'length')
+          W4_COUNT=$(echo "$WAVE_4" | jq 'length')
+          
+          END_TIME=$(date +%s%3N)
+          ANALYSIS_TIME=$((END_TIME - START_TIME))
+          
+          echo ""
+          echo "📊 Strategy: $STRATEGY"
+          echo "   Max Parallel: $BASE_PARALLEL"
+          echo "   Batch Size: $BASE_BATCH"
+          echo "   Base Delay: ${BASE_DELAY}s"
+          echo ""
+          echo "🌊 Waves:"
+          echo "   Wave 1 (Critical): $W1_COUNT"
+          echo "   Wave 2 (High):     $W2_COUNT"
+          echo "   Wave 3 (Normal):   $W3_COUNT"
+          echo "   Wave 4 (Low):      $W4_COUNT"
+          echo ""
+          echo "⏱️ Analysis Time: ${ANALYSIS_TIME}ms"
+          
+          echo "strategy=$STRATEGY" >> $GITHUB_OUTPUT
+          echo "max_parallel=$BASE_PARALLEL" >> $GITHUB_OUTPUT
+          echo "batch_size=$BASE_BATCH" >> $GITHUB_OUTPUT
+          echo "base_delay=$BASE_DELAY" >> $GITHUB_OUTPUT
+          echo "analysis_time=$ANALYSIS_TIME" >> $GITHUB_OUTPUT
+          echo "w1_count=$W1_COUNT" >> $GITHUB_OUTPUT
+          echo "w2_count=$W2_COUNT" >> $GITHUB_OUTPUT
+          echo "w3_count=$W3_COUNT" >> $GITHUB_OUTPUT
+          echo "w4_count=$W4_COUNT" >> $GITHUB_OUTPUT
+      
+      - name: "⚡ Simulate Dispatch Performance"
+        id: simulate
+        run: |
+          CONSUMERS='${{ steps.generate.outputs.consumers }}'
+          TOTAL=${{ steps.generate.outputs.count }}
+          MAX_PARALLEL=${{ steps.brain.outputs.max_parallel }}
+          BATCH_SIZE=${{ steps.brain.outputs.batch_size }}
+          BASE_DELAY=${{ steps.brain.outputs.base_delay }}
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+          
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "⚡ DISPATCH SIMULATION"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "Total: $TOTAL consumers"
+          echo "Max Parallel: $MAX_PARALLEL"
+          echo "Batch Size: $BATCH_SIZE"
+          echo "Base Delay: ${BASE_DELAY}s"
+          echo ""
+          
+          START_TIME=$(date +%s%3N)
+          
+          # Simula dispatch com tempos realistas
+          # GitHub dispatch leva ~100-300ms por request
+          AVG_DISPATCH_MS=150
+          
+          # Wave 1 (Critical) - Parallel
+          W1=${{ steps.brain.outputs.w1_count }}
+          if [ $W1 -gt 0 ]; then
+            W1_BATCHES=$(( (W1 + MAX_PARALLEL - 1) / MAX_PARALLEL ))
+            W1_TIME=$((W1_BATCHES * AVG_DISPATCH_MS + W1_BATCHES * 200))
+            echo "🔴 Wave 1: $W1 consumers in $W1_BATCHES batches (~${W1_TIME}ms)"
+            # Simula tempo
+            sleep $(echo "scale=3; $W1_TIME / 1000" | bc)
+          fi
+          
+          # Delay entre waves
+          sleep $BASE_DELAY
+          
+          # Wave 2 (High)
+          W2=${{ steps.brain.outputs.w2_count }}
+          if [ $W2 -gt 0 ]; then
+            W2_BATCHES=$(( (W2 + BATCH_SIZE - 1) / BATCH_SIZE ))
+            W2_TIME=$((W2 * AVG_DISPATCH_MS / MAX_PARALLEL + W2_BATCHES * BASE_DELAY * 1000))
+            echo "🟠 Wave 2: $W2 consumers in $W2_BATCHES batches"
+            sleep $(echo "scale=3; $W2_TIME / 1000 / 10" | bc)  # Accelerated
+          fi
+          
+          sleep $BASE_DELAY
+          
+          # Wave 3 (Normal) - Maior, mais batches
+          W3=${{ steps.brain.outputs.w3_count }}
+          if [ $W3 -gt 0 ]; then
+            W3_BATCHES=$(( (W3 + BATCH_SIZE - 1) / BATCH_SIZE ))
+            W3_TIME=$((W3 * AVG_DISPATCH_MS / MAX_PARALLEL + W3_BATCHES * BASE_DELAY * 1000))
+            echo "🟡 Wave 3: $W3 consumers in $W3_BATCHES batches"
+            sleep $(echo "scale=3; $W3_TIME / 1000 / 10" | bc)  # Accelerated
+          fi
+          
+          sleep $BASE_DELAY
+          
+          # Wave 4 (Low)
+          W4=${{ steps.brain.outputs.w4_count }}
+          if [ $W4 -gt 0 ]; then
+            W4_BATCHES=$(( (W4 + BATCH_SIZE - 1) / BATCH_SIZE ))
+            echo "🟢 Wave 4: $W4 consumers in $W4_BATCHES batches"
+            sleep $(echo "scale=3; $W4 * $AVG_DISPATCH_MS / $MAX_PARALLEL / 1000 / 10" | bc)
+          fi
+          
+          END_TIME=$(date +%s%3N)
+          TOTAL_TIME=$((END_TIME - START_TIME))
+          
+          # Calcula estimativa real (sem aceleração)
+          TOTAL_BATCHES=$(( (TOTAL + BATCH_SIZE - 1) / BATCH_SIZE ))
+          ESTIMATED_REAL_TIME=$((TOTAL * AVG_DISPATCH_MS / MAX_PARALLEL + TOTAL_BATCHES * BASE_DELAY * 1000 + 4 * BASE_DELAY * 1000))
+          ESTIMATED_REAL_SECONDS=$((ESTIMATED_REAL_TIME / 1000))
+          ESTIMATED_REAL_MINUTES=$(echo "scale=2; $ESTIMATED_REAL_SECONDS / 60" | bc)
+          
+          # Throughput
+          THROUGHPUT=$(echo "scale=2; $TOTAL / $ESTIMATED_REAL_SECONDS" | bc)
+          
+          echo ""
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📊 PERFORMANCE RESULTS"
+          echo "═══════════════════════════════════════════════════════════════"
+          echo ""
+          echo "Simulation Time: ${TOTAL_TIME}ms (accelerated 10x)"
+          echo ""
+          echo "📈 REAL ESTIMATED PERFORMANCE:"
+          echo "   Total Consumers: $TOTAL"
+          echo "   Total Batches: $TOTAL_BATCHES"
+          echo "   Estimated Time: ${ESTIMATED_REAL_SECONDS}s (~${ESTIMATED_REAL_MINUTES} min)"
+          echo "   Throughput: ${THROUGHPUT} consumers/second"
+          echo ""
+          
+          # Verifica limites
+          GITHUB_RATE_LIMIT=1000
+          ESTIMATED_API_CALLS=$((TOTAL + 10))  # +10 for overhead
+          RATE_USAGE_PERCENT=$(echo "scale=2; $ESTIMATED_API_CALLS / $GITHUB_RATE_LIMIT * 100" | bc)
+          
+          echo "📊 API USAGE:"
+          echo "   Estimated API Calls: $ESTIMATED_API_CALLS"
+          echo "   Rate Limit Usage: ${RATE_USAGE_PERCENT}% of 1000/hour"
+          
+          if (( $(echo "$RATE_USAGE_PERCENT > 80" | bc -l) )); then
+            echo "   ⚠️ WARNING: High rate limit usage!"
+          else
+            echo "   ✅ Rate limit usage is safe"
+          fi
+          
+          echo ""
+          echo "simulation_time=$TOTAL_TIME" >> $GITHUB_OUTPUT
+          echo "estimated_seconds=$ESTIMATED_REAL_SECONDS" >> $GITHUB_OUTPUT
+          echo "estimated_minutes=$ESTIMATED_REAL_MINUTES" >> $GITHUB_OUTPUT
+          echo "throughput=$THROUGHPUT" >> $GITHUB_OUTPUT
+          echo "api_calls=$ESTIMATED_API_CALLS" >> $GITHUB_OUTPUT
+          echo "rate_usage=$RATE_USAGE_PERCENT" >> $GITHUB_OUTPUT
+      
+      - name: "📊 Generate Report"
+        run: |
+          cat << EOF >> $GITHUB_STEP_SUMMARY
+          ## 🧪 Performance Test - ${{ matrix.scenario }}
+          
+          ### 📋 Test Configuration
+          | Parameter | Value |
+          |-----------|-------|
+          | Scenario | **${{ matrix.scenario }}** |
+          | Total Consumers | **${{ steps.generate.outputs.count }}** |
+          | Dry Run | ${{ github.event.inputs.dry_run }} |
+          
+          ### 📊 Consumer Distribution
+          | Priority | Count | Percentage |
+          |----------|-------|------------|
+          | 🔴 Critical | ${{ steps.generate.outputs.critical }} | $(echo "scale=1; ${{ steps.generate.outputs.critical }} * 100 / ${{ steps.generate.outputs.count }}" | bc)% |
+          | 🟠 High | ${{ steps.generate.outputs.high }} | $(echo "scale=1; ${{ steps.generate.outputs.high }} * 100 / ${{ steps.generate.outputs.count }}" | bc)% |
+          | 🟡 Normal | ${{ steps.generate.outputs.normal }} | $(echo "scale=1; ${{ steps.generate.outputs.normal }} * 100 / ${{ steps.generate.outputs.count }}" | bc)% |
+          | 🟢 Low | ${{ steps.generate.outputs.low }} | $(echo "scale=1; ${{ steps.generate.outputs.low }} * 100 / ${{ steps.generate.outputs.count }}" | bc)% |
+          
+          ### 🧠 Auto-Calculated Strategy
+          | Parameter | Value |
+          |-----------|-------|
+          | Strategy | \`${{ steps.brain.outputs.strategy }}\` |
+          | Max Parallel | ${{ steps.brain.outputs.max_parallel }} |
+          | Batch Size | ${{ steps.brain.outputs.batch_size }} |
+          | Base Delay | ${{ steps.brain.outputs.base_delay }}s |
+          | Analysis Time | ${{ steps.brain.outputs.analysis_time }}ms |
+          
+          ### 🌊 Wave Distribution
+          | Wave | Priority | Consumers |
+          |------|----------|-----------|
+          | 1 | Critical | ${{ steps.brain.outputs.w1_count }} |
+          | 2 | High | ${{ steps.brain.outputs.w2_count }} |
+          | 3 | Normal | ${{ steps.brain.outputs.w3_count }} |
+          | 4 | Low | ${{ steps.brain.outputs.w4_count }} |
+          
+          ### ⚡ Performance Results
+          | Metric | Value |
+          |--------|-------|
+          | **Estimated Total Time** | **${{ steps.simulate.outputs.estimated_seconds }}s** (~${{ steps.simulate.outputs.estimated_minutes }} min) |
+          | **Throughput** | **${{ steps.simulate.outputs.throughput }} consumers/sec** |
+          | API Calls | ${{ steps.simulate.outputs.api_calls }} |
+          | Rate Limit Usage | ${{ steps.simulate.outputs.rate_usage }}% |
+          
+          ### ✅ Assessment
+          EOF
+          
+          RATE="${{ steps.simulate.outputs.rate_usage }}"
+          TIME="${{ steps.simulate.outputs.estimated_seconds }}"
+          
+          if (( $(echo "$RATE < 50" | bc -l) )) && (( $(echo "$TIME < 300" | bc -l) )); then
+            echo "🟢 **EXCELLENT** - Fast execution with low API usage" >> $GITHUB_STEP_SUMMARY
+          elif (( $(echo "$RATE < 80" | bc -l) )) && (( $(echo "$TIME < 600" | bc -l) )); then
+            echo "🟡 **GOOD** - Acceptable performance" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🟠 **ACCEPTABLE** - Consider optimization for production" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  summary:
+    name: "📊 Summary"
+    runs-on: ubuntu-latest
+    needs: [setup, test]
+    if: always()
+    
+    steps:
+      - name: "📊 Final Summary"
+        run: |
+          echo "## 🧪 Performance Test Suite Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "All scenarios have been tested. Check individual job summaries for details." >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🎯 Recommendations" >> $GITHUB_STEP_SUMMARY
+          echo "- For < 50 consumers: Use \`turbo\` or \`fast\` strategy" >> $GITHUB_STEP_SUMMARY
+          echo "- For 50-100 consumers: Use \`balanced\` strategy" >> $GITHUB_STEP_SUMMARY
+          echo "- For 100+ consumers: Use \`safe\` strategy with batch processing" >> $GITHUB_STEP_SUMMARY
+          echo "- For 200+ consumers: Consider multiple runs or scheduled dispatch" >> $GITHUB_STEP_SUMMARY
