@@ -1,0 +1,33 @@
+{
+  "name": "sdk-compatibility-system",
+  "version": "1.0.0",
+  "description": "Enterprise-grade SDK Compatibility System with Event-Driven Architecture",
+  "main": "scripts/setup.js",
+  "scripts": {
+    "setup": "node scripts/setup.js",
+    "validate": "node scripts/validate.js",
+    "test": "node scripts/test-local.js",
+    "lint:yaml": "npx yaml-lint .compatibility/*.yml .github/workflows/*.yml"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ricardo2009/poc-sdk-compatibility.git"
+  },
+  "keywords": [
+    "sdk",
+    "compatibility",
+    "github-actions",
+    "event-driven",
+    "automation"
+  ],
+  "author": "Ricardo Lima",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/ricardo2009/poc-sdk-compatibility/issues"
+  },
+  "homepage": "https://github.com/ricardo2009/poc-sdk-compatibility#readme",
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

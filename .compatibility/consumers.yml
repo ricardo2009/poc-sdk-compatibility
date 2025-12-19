@@ -1,0 +1,206 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📋 CONSUMER REGISTRY
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Este arquivo define todos os consumidores do SDK que serão notificados
+# automaticamente quando uma nova versão for liberada.
+#
+# IMPORTANTE: O SDK (producer) NÃO conhece os consumers.
+#             Apenas o Orchestrator conhece este registry.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# METADATA
+# ─────────────────────────────────────────────────────────────────────────────────
+
+registry:
+  version: "1.0.0"
+  updated_at: "2024-12-18"
+  updated_by: "platform-team"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CONSUMERS
+# ─────────────────────────────────────────────────────────────────────────────────
+#
+# Cada consumer representa um mini-app que depende do SDK.
+#
+# Campos:
+#   - name: Identificador único do consumer
+#   - repository: Repositório GitHub (org/repo)
+#   - priority: critical | high | medium | low
+#   - enabled: true/false para ativar/desativar
+#   - team: Time responsável
+#   - workflow: Nome do workflow que será disparado
+#   - config: Configurações específicas do consumer
+#
+# ─────────────────────────────────────────────────────────────────────────────────
+
+consumers:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # EXEMPLO 1: Mini-App PIX
+  # ═══════════════════════════════════════════════════════════════════════════════
+  - name: "miniapp-pix"
+    display_name: "Mini-App PIX"
+    description: "Módulo de transferências PIX"
+    repository: "${GITHUB_ORG:-ricardo2009}/miniapp-pix"
+    priority: "critical"
+    enabled: true
+    team: "squad-pix"
+    contacts:
+      - "pix-team@example.com"
+    
+    # Workflow que será disparado neste consumer
+    workflow:
+      file: "consumer-validate.yml"
+      event_type: "sdk.validate"
+    
+    # Configurações específicas
+    config:
+      # Diretório onde o SDK é usado
+      sdk_path: "."
+      
+      # Arquivo package.json
+      package_json: "package.json"
+      
+      # Testes a executar
+      test_command: "npm test"
+      
+      # Branch base para PRs
+      base_branch: "main"
+      
+      # Auto-merge habilitado?
+      auto_merge: true
+    
+    # Tags para filtros
+    tags:
+      - "payments"
+      - "critical-path"
+      - "production"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # EXEMPLO 2: Mini-App Pagamentos
+  # ═══════════════════════════════════════════════════════════════════════════════
+  - name: "miniapp-pagamentos"
+    display_name: "Mini-App Pagamentos"
+    description: "Módulo de pagamentos de contas"
+    repository: "${GITHUB_ORG:-ricardo2009}/miniapp-pagamentos"
+    priority: "high"
+    enabled: true
+    team: "squad-pagamentos"
+    contacts:
+      - "pagamentos-team@example.com"
+    
+    workflow:
+      file: "consumer-validate.yml"
+      event_type: "sdk.validate"
+    
+    config:
+      sdk_path: "."
+      package_json: "package.json"
+      test_command: "npm test"
+      base_branch: "main"
+      auto_merge: true
+    
+    tags:
+      - "payments"
+      - "production"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # TEMPLATE: Copie este bloco para adicionar novos consumers
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # - name: "miniapp-nome"
+  #   display_name: "Mini-App Nome"
+  #   description: "Descrição do módulo"
+  #   repository: "${GITHUB_ORG:-ricardo2009}/miniapp-nome"
+  #   priority: "medium"  # critical | high | medium | low
+  #   enabled: true
+  #   team: "squad-nome"
+  #   contacts:
+  #     - "team@example.com"
+  #   
+  #   workflow:
+  #     file: "consumer-validate.yml"
+  #     event_type: "sdk.validate"
+  #   
+  #   config:
+  #     sdk_path: "."
+  #     package_json: "package.json"
+  #     test_command: "npm test"
+  #     base_branch: "main"
+  #     auto_merge: false
+  #   
+  #   tags:
+  #     - "tag1"
+  #     - "tag2"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# GRUPOS DE CONSUMERS
+# ─────────────────────────────────────────────────────────────────────────────────
+#
+# Permite agrupar consumers para operações em lote.
+#
+# ─────────────────────────────────────────────────────────────────────────────────
+
+groups:
+  # Grupo de consumers críticos (validar primeiro)
+  critical:
+    description: "Consumers que devem ser validados primeiro"
+    filter:
+      priority: "critical"
+    validation_order: 1
+  
+  # Grupo de pagamentos
+  payments:
+    description: "Todos os consumers relacionados a pagamentos"
+    filter:
+      tags:
+        includes: ["payments"]
+    validation_order: 2
+  
+  # Grupo de produção
+  production:
+    description: "Consumers em produção"
+    filter:
+      tags:
+        includes: ["production"]
+    require_all_pass: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CONFIGURAÇÃO DE DISPATCH
+# ─────────────────────────────────────────────────────────────────────────────────
+
+dispatch:
+  # Estratégia de dispatch
+  strategy: "parallel"  # parallel | sequential | priority-based
+  
+  # Delay entre dispatches (para rate limiting)
+  delay_between_ms: 1000
+  
+  # Máximo de dispatches simultâneos
+  max_concurrent: 10
+  
+  # Timeout para aguardar todos os consumers
+  aggregate_timeout_minutes: 60
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# VALIDAÇÃO DO REGISTRY
+# ─────────────────────────────────────────────────────────────────────────────────
+
+validation:
+  # Schema version para validação
+  schema_version: "1.0"
+  
+  # Campos obrigatórios para cada consumer
+  required_fields:
+    - "name"
+    - "repository"
+    - "priority"
+    - "enabled"
+  
+  # Valores válidos para priority
+  valid_priorities:
+    - "critical"
+    - "high"
+    - "medium"
+    - "low"

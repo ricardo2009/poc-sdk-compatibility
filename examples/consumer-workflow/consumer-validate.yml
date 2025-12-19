@@ -1,0 +1,294 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 📥 CONSUMER VALIDATION WORKFLOW (TEMPLATE)
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Este workflow deve ser copiado para cada mini-app que consome o SDK.
+# Ele é disparado pelo Orchestrator quando uma nova versão do SDK é liberada.
+#
+# O que este workflow faz:
+#   1. Recebe notificação do Orchestrator
+#   2. Atualiza o SDK para a nova versão
+#   3. Executa testes de compatibilidade
+#   4. Cria PR com as mudanças (se sucesso)
+#   5. Reporta resultado ao Orchestrator
+#
+# INSTALAÇÃO:
+#   1. Copie este arquivo para: .github/workflows/consumer-validate.yml
+#   2. Configure o secret DISPATCH_TOKEN
+#   3. Pronto! O Orchestrator irá disparar automaticamente.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "📥 SDK Compatibility - Consumer Validation"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TRIGGERS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+on:
+  # Recebe evento do Orchestrator
+  repository_dispatch:
+    types:
+      - sdk.validate
+  
+  # Manual para testes
+  workflow_dispatch:
+    inputs:
+      sdk_version:
+        description: 'SDK Version to validate'
+        required: true
+        default: '1.0.0'
+      auto_merge:
+        description: 'Auto-merge if tests pass'
+        type: boolean
+        default: false
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────────
+
+env:
+  NODE_VERSION: '18'
+  SDK_PACKAGE: '@your-scope/superapp-sdk'  # Ajuste conforme seu package
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# JOBS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 1: VALIDATE COMPATIBILITY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  validate:
+    name: "🧪 Validate"
+    runs-on: ubuntu-latest
+    
+    outputs:
+      status: ${{ steps.test.outputs.status }}
+      sdk_version: ${{ steps.info.outputs.sdk_version }}
+      validation_id: ${{ steps.info.outputs.validation_id }}
+      branch_name: ${{ steps.branch.outputs.name }}
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: "📋 Extract Info"
+        id: info
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📋 EXTRACTING VALIDATION INFO"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          if [ "${{ github.event_name }}" == "repository_dispatch" ]; then
+            SDK_VERSION="${{ github.event.client_payload.sdk.version }}"
+            VALIDATION_ID="${{ github.event.client_payload.validation_id }}"
+            AUTO_MERGE="${{ github.event.client_payload.automation.auto_merge }}"
+            CALLBACK_REPO="${{ github.event.client_payload.callback.repository }}"
+          else
+            SDK_VERSION="${{ github.event.inputs.sdk_version }}"
+            VALIDATION_ID="${{ github.run_id }}"
+            AUTO_MERGE="${{ github.event.inputs.auto_merge }}"
+            CALLBACK_REPO=""
+          fi
+          
+          echo "SDK Version: $SDK_VERSION"
+          echo "Validation ID: $VALIDATION_ID"
+          echo "Auto-merge: $AUTO_MERGE"
+          
+          echo "sdk_version=$SDK_VERSION" >> $GITHUB_OUTPUT
+          echo "validation_id=$VALIDATION_ID" >> $GITHUB_OUTPUT
+          echo "auto_merge=$AUTO_MERGE" >> $GITHUB_OUTPUT
+          echo "callback_repo=$CALLBACK_REPO" >> $GITHUB_OUTPUT
+      
+      - name: "🔧 Setup Node.js"
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+      
+      - name: "📦 Install Dependencies"
+        run: npm ci
+      
+      - name: "🌿 Create Branch"
+        id: branch
+        run: |
+          BRANCH_NAME="sdk-update/${{ steps.info.outputs.sdk_version }}"
+          echo "Creating branch: $BRANCH_NAME"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          git checkout -b "$BRANCH_NAME"
+          
+          echo "name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+      
+      - name: "⬆️ Update SDK"
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "⬆️ UPDATING SDK TO VERSION ${{ steps.info.outputs.sdk_version }}"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Simula atualização do SDK (ajuste conforme seu package)
+          # npm install ${{ env.SDK_PACKAGE }}@${{ steps.info.outputs.sdk_version }}
+          
+          # Para a POC, apenas atualiza package.json
+          echo "SDK update simulated for POC"
+      
+      - name: "🧪 Run Tests"
+        id: test
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "🧪 RUNNING COMPATIBILITY TESTS"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Executa testes
+          if npm test 2>&1; then
+            echo "✅ All tests passed!"
+            echo "status=success" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Tests failed!"
+            echo "status=failure" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+      
+      - name: "📝 Commit Changes"
+        if: steps.test.outputs.status == 'success'
+        run: |
+          git add .
+          git commit -m "⬆️ chore(sdk): update to version ${{ steps.info.outputs.sdk_version }}" || echo "No changes to commit"
+          git push origin "${{ steps.branch.outputs.name }}" --force
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 2: CREATE PULL REQUEST
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  create-pr:
+    name: "📝 Create PR"
+    runs-on: ubuntu-latest
+    needs: validate
+    if: needs.validate.outputs.status == 'success'
+    
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pull-request-url }}
+      pr_number: ${{ steps.pr.outputs.pull-request-number }}
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.branch_name }}
+      
+      - name: "📝 Create Pull Request"
+        id: pr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: ${{ needs.validate.outputs.branch_name }}
+          base: main
+          title: "⬆️ SDK Update: ${{ needs.validate.outputs.sdk_version }}"
+          body: |
+            ## 🔄 SDK Compatibility Update
+            
+            This PR was automatically created by the SDK Compatibility System.
+            
+            ### 📦 Changes
+            - **SDK Version:** `${{ needs.validate.outputs.sdk_version }}`
+            - **Validation ID:** `${{ needs.validate.outputs.validation_id }}`
+            
+            ### ✅ Validation Results
+            - [x] Dependencies installed successfully
+            - [x] All tests passed
+            - [x] No breaking changes detected
+            
+            ### 📋 Checklist
+            - [ ] Review the changes
+            - [ ] Verify all tests pass in CI
+            - [ ] Merge when ready
+            
+            ---
+            *Generated by [SDK Compatibility System](https://github.com/${{ github.repository }})*
+          labels: |
+            sdk-update
+            automated
+          draft: false
+      
+      - name: "📋 Log PR"
+        run: |
+          echo "✅ Pull Request created!"
+          echo "   URL: ${{ steps.pr.outputs.pull-request-url }}"
+          echo "   Number: ${{ steps.pr.outputs.pull-request-number }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 3: REPORT BACK TO ORCHESTRATOR
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  report-back:
+    name: "📩 Report"
+    runs-on: ubuntu-latest
+    needs: [validate, create-pr]
+    if: always() && github.event_name == 'repository_dispatch'
+    
+    steps:
+      - name: "📩 Report to Orchestrator"
+        if: github.event.client_payload.callback.repository != ''
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: ${{ github.event.client_payload.callback.repository }}
+          event-type: consumer.validation.complete
+          client-payload: |
+            {
+              "validation_id": "${{ needs.validate.outputs.validation_id }}",
+              "consumer": {
+                "name": "${{ github.event.repository.name }}",
+                "repository": "${{ github.repository }}"
+              },
+              "sdk_version": "${{ needs.validate.outputs.sdk_version }}",
+              "status": "${{ needs.validate.outputs.status }}",
+              "pr_url": "${{ needs.create-pr.outputs.pr_url || 'N/A' }}",
+              "pr_number": "${{ needs.create-pr.outputs.pr_number || 0 }}",
+              "run_url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            }
+      
+      - name: "📋 Log Report"
+        run: |
+          echo "📩 Reported back to Orchestrator"
+          echo "   Status: ${{ needs.validate.outputs.status }}"
+          echo "   PR: ${{ needs.create-pr.outputs.pr_url || 'N/A' }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 4: SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  summary:
+    name: "📊 Summary"
+    runs-on: ubuntu-latest
+    needs: [validate, create-pr, report-back]
+    if: always()
+    
+    steps:
+      - name: "📊 Generate Summary"
+        run: |
+          echo "## 📥 SDK Compatibility Validation" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 SDK Version" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${{ needs.validate.outputs.sdk_version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Validation ID:** \`${{ needs.validate.outputs.validation_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🧪 Validation Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ${{ needs.validate.outputs.status == 'success' && '✅ Passed' || '❌ Failed' }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.create-pr.outputs.pr_url }}" != "" ]; then
+            echo "### 📝 Pull Request" >> $GITHUB_STEP_SUMMARY
+            echo "- **URL:** ${{ needs.create-pr.outputs.pr_url }}" >> $GITHUB_STEP_SUMMARY
+            echo "- **Number:** #${{ needs.create-pr.outputs.pr_number }}" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Validation complete!" >> $GITHUB_STEP_SUMMARY

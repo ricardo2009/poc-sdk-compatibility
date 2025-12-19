@@ -1,0 +1,246 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 SDK COMPATIBILITY - MASTER CONFIGURATION
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Este arquivo contém toda a configuração do sistema de compatibilidade.
+# Todas as variáveis usam ${VAR:-default} para máxima portabilidade.
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# IDENTIFICAÇÃO
+# ─────────────────────────────────────────────────────────────────────────────────
+
+metadata:
+  name: "SDK Compatibility System"
+  version: "1.0.0"
+  description: "Event-driven SDK compatibility validation for multi-repo architectures"
+  maintainers:
+    - "ricardolima@microsoft.com"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ORGANIZAÇÃO E REPOSITÓRIOS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+organization:
+  # GitHub organization/user - será substituído pelo setup.js
+  name: "${GITHUB_ORG:-ricardo2009}"
+  
+  # Repositório do orchestrator (este repo)
+  orchestrator:
+    repository: "${GITHUB_ORG:-ricardo2009}/poc-sdk-compatibility"
+    
+  # SDK que será monitorado (pode ser externo)
+  sdk:
+    name: "superapp-sdk"
+    # Se o SDK estiver em outro repo, configure aqui
+    # repository: "${GITHUB_ORG:-ricardo2009}/superapp-sdk"
+    npm_package: "@${NPM_SCOPE:-your-scope}/superapp-sdk"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EVENTOS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+events:
+  # Evento emitido quando SDK é liberado
+  sdk_released:
+    type: "sdk.released"
+    description: "Emitted when a new SDK version is published"
+    payload:
+      - version
+      - changelog
+      - breaking_changes
+      - release_url
+      - contract
+  
+  # Evento enviado para consumers
+  sdk_validate:
+    type: "sdk.validate"
+    description: "Sent to consumers to trigger validation"
+    payload:
+      - sdk_version
+      - priority
+      - validation_id
+      - callback_repo
+  
+  # Evento de callback do consumer
+  validation_complete:
+    type: "consumer.validation.complete"
+    description: "Sent by consumer after validation"
+    payload:
+      - consumer_name
+      - validation_id
+      - status
+      - test_results
+      - pr_url
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# REGRAS DE AUTOMAÇÃO (Policy as Code)
+# ─────────────────────────────────────────────────────────────────────────────────
+
+automation:
+  rules:
+    # Regra para patches (1.0.x)
+    - name: "Auto-merge patches"
+      condition:
+        version_type: "patch"
+        all_tests_pass: true
+      action:
+        auto_merge: true
+        require_review: false
+        notify: ["slack-releases"]
+      priority: 1
+    
+    # Regra para minor versions (1.x.0)
+    - name: "Review minor updates"
+      condition:
+        version_type: "minor"
+        all_tests_pass: true
+      action:
+        auto_merge: false
+        require_review: true
+        reviewers: ["@platform-team"]
+        notify: ["slack-releases", "email-leads"]
+      priority: 2
+    
+    # Regra para major versions (x.0.0)
+    - name: "Full review for majors"
+      condition:
+        version_type: "major"
+      action:
+        auto_merge: false
+        require_review: true
+        require_multiple_reviews: 2
+        reviewers: ["@platform-team", "@tech-leads"]
+        notify: ["slack-releases", "email-all", "teams-channel"]
+        create_tracking_issue: true
+      priority: 3
+    
+    # Regra para breaking changes
+    - name: "Block breaking changes"
+      condition:
+        has_breaking_changes: true
+      action:
+        auto_merge: false
+        require_review: true
+        require_breaking_change_review: true
+        labels: ["breaking-change", "needs-migration-guide"]
+        notify: ["slack-urgent", "email-all"]
+      priority: 0  # Highest priority
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# VALIDAÇÃO
+# ─────────────────────────────────────────────────────────────────────────────────
+
+validation:
+  # Timeout para validação de cada consumer
+  timeout_minutes: 30
+  
+  # Número de retries em caso de falha
+  max_retries: 2
+  
+  # Estratégia de retry
+  retry_strategy: "exponential"
+  
+  # Testes obrigatórios
+  required_checks:
+    - "unit-tests"
+    - "lint"
+    - "type-check"
+  
+  # Testes opcionais (não bloqueiam)
+  optional_checks:
+    - "e2e-tests"
+    - "performance-tests"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# NOTIFICAÇÕES
+# ─────────────────────────────────────────────────────────────────────────────────
+
+notifications:
+  channels:
+    slack-releases:
+      type: "slack"
+      webhook: "${SLACK_WEBHOOK_RELEASES}"
+      template: "sdk-update"
+    
+    slack-urgent:
+      type: "slack"
+      webhook: "${SLACK_WEBHOOK_URGENT}"
+      template: "breaking-change"
+    
+    email-leads:
+      type: "email"
+      recipients: "${EMAIL_LEADS}"
+      template: "sdk-review-needed"
+    
+    email-all:
+      type: "email"
+      recipients: "${EMAIL_ALL}"
+      template: "sdk-major-update"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TEMPLATES
+# ─────────────────────────────────────────────────────────────────────────────────
+
+templates:
+  pr:
+    title: "⬆️ SDK Update: ${SDK_VERSION}"
+    body: |
+      ## 🔄 SDK Compatibility Update
+      
+      This PR was automatically created by the SDK Compatibility System.
+      
+      ### 📦 Changes
+      - **SDK Version:** `${OLD_VERSION}` → `${NEW_VERSION}`
+      - **Release Notes:** ${RELEASE_URL}
+      
+      ### ✅ Validation Results
+      ${VALIDATION_RESULTS}
+      
+      ### 📋 Checklist
+      - [ ] Review breaking changes (if any)
+      - [ ] Verify all tests pass
+      - [ ] Update migration guide (if needed)
+      
+      ---
+      *Generated by [SDK Compatibility System](${ORCHESTRATOR_URL})*
+    
+    labels:
+      - "sdk-update"
+      - "automated"
+
+  branch:
+    pattern: "sdk-update/${SDK_VERSION}"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# FEATURE FLAGS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+features:
+  # Habilita criação automática de PRs
+  auto_create_pr: true
+  
+  # Habilita merge automático para patches
+  auto_merge_patches: true
+  
+  # Habilita notificações
+  notifications_enabled: false  # Desabilitado para POC
+  
+  # Habilita tracking de métricas
+  metrics_enabled: false  # Desabilitado para POC
+  
+  # Modo dry-run (não executa ações, apenas loga)
+  dry_run: false
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# MÉTRICAS (para futuro)
+# ─────────────────────────────────────────────────────────────────────────────────
+
+metrics:
+  enabled: false
+  provider: "datadog"
+  prefix: "sdk_compatibility"
+  tags:
+    - "environment:${ENVIRONMENT:-development}"
+    - "team:platform"

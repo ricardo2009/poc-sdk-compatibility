@@ -1,0 +1,347 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🎯 ORCHESTRATOR - EVENT RECEIVER & DISPATCHER
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Este é o CÉREBRO do sistema. Ele:
+#   1. Recebe eventos do SDK (sdk.released)
+#   2. Carrega o registry de consumers
+#   3. Aplica regras de automação
+#   4. Despacha eventos para cada consumer
+#   5. Agrega resultados de validação
+#
+# PRINCÍPIO: Zero-Coupling
+#   - O SDK NÃO conhece os consumers
+#   - Consumers NÃO conhecem uns aos outros
+#   - Apenas o Orchestrator conhece todos
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "🎯 Orchestrator - Receive & Dispatch"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TRIGGERS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+on:
+  # Recebe eventos via repository_dispatch
+  repository_dispatch:
+    types:
+      - sdk.released              # Evento do SDK
+      - consumer.validation.complete  # Callback dos consumers
+  
+  # Manual trigger para testes
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        type: choice
+        options:
+          - 'test-dispatch'
+          - 'validate-config'
+          - 'list-consumers'
+      sdk_version:
+        description: 'SDK Version (for test-dispatch)'
+        required: false
+        default: '1.0.0'
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ENVIRONMENT
+# ─────────────────────────────────────────────────────────────────────────────────
+
+env:
+  GITHUB_ORG: ${{ vars.GITHUB_ORG || github.repository_owner }}
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# JOBS
+# ─────────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 1: PARSE INCOMING EVENT
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  parse-event:
+    name: "📥 Parse Event"
+    runs-on: ubuntu-latest
+    
+    outputs:
+      event_type: ${{ steps.parse.outputs.event_type }}
+      event_data: ${{ steps.parse.outputs.event_data }}
+      sdk_version: ${{ steps.parse.outputs.sdk_version }}
+      validation_id: ${{ steps.parse.outputs.validation_id }}
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+      
+      - name: "🔍 Parse Incoming Event"
+        id: parse
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📥 PARSING INCOMING EVENT"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          EVENT_TYPE="${{ github.event.action }}"
+          echo "Event Type: $EVENT_TYPE"
+          
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            EVENT_TYPE="${{ github.event.inputs.action }}"
+            SDK_VERSION="${{ github.event.inputs.sdk_version }}"
+          elif [ "$EVENT_TYPE" == "sdk.released" ]; then
+            SDK_VERSION="${{ github.event.client_payload.sdk.version }}"
+          elif [ "$EVENT_TYPE" == "consumer.validation.complete" ]; then
+            SDK_VERSION="${{ github.event.client_payload.sdk_version }}"
+          fi
+          
+          VALIDATION_ID="${{ github.run_id }}-${{ github.run_attempt }}"
+          
+          echo "SDK Version: $SDK_VERSION"
+          echo "Validation ID: $VALIDATION_ID"
+          
+          echo "event_type=$EVENT_TYPE" >> $GITHUB_OUTPUT
+          echo "sdk_version=$SDK_VERSION" >> $GITHUB_OUTPUT
+          echo "validation_id=$VALIDATION_ID" >> $GITHUB_OUTPUT
+          
+          # Salva payload completo
+          echo '${{ toJSON(github.event.client_payload) }}' > /tmp/event_data.json
+          echo "event_data=$(cat /tmp/event_data.json | jq -c .)" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 2: LOAD CONSUMER REGISTRY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  load-registry:
+    name: "📋 Load Registry"
+    runs-on: ubuntu-latest
+    needs: parse-event
+    if: needs.parse-event.outputs.event_type == 'sdk.released' || needs.parse-event.outputs.event_type == 'test-dispatch'
+    
+    outputs:
+      consumers: ${{ steps.load.outputs.consumers }}
+      consumer_count: ${{ steps.load.outputs.consumer_count }}
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+      
+      - name: "📋 Load Consumer Registry"
+        id: load
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📋 LOADING CONSUMER REGISTRY"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          # Instala yq para parsing YAML
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+          
+          REGISTRY_FILE=".compatibility/consumers.yml"
+          
+          if [ ! -f "$REGISTRY_FILE" ]; then
+            echo "❌ Registry file not found: $REGISTRY_FILE"
+            exit 1
+          fi
+          
+          # Substitui variáveis
+          GITHUB_ORG="${{ env.GITHUB_ORG }}"
+          sed -i "s/\${GITHUB_ORG:-[^}]*}/$GITHUB_ORG/g" "$REGISTRY_FILE"
+          sed -i "s/\${GITHUB_ORG}/$GITHUB_ORG/g" "$REGISTRY_FILE"
+          
+          # Extrai consumers habilitados
+          CONSUMERS=$(yq e '.consumers | map(select(.enabled == true)) | map({"name": .name, "repository": .repository, "priority": .priority, "event_type": .workflow.event_type})' -o=json "$REGISTRY_FILE")
+          
+          CONSUMER_COUNT=$(echo "$CONSUMERS" | jq '. | length')
+          
+          echo "📋 Found $CONSUMER_COUNT enabled consumers:"
+          echo "$CONSUMERS" | jq -r '.[] | "   - \(.name) (\(.repository)) [\(.priority)]"'
+          
+          # Escape para output
+          CONSUMERS_ESCAPED=$(echo "$CONSUMERS" | jq -c .)
+          echo "consumers=$CONSUMERS_ESCAPED" >> $GITHUB_OUTPUT
+          echo "consumer_count=$CONSUMER_COUNT" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 3: APPLY AUTOMATION RULES
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  apply-rules:
+    name: "⚙️ Apply Rules"
+    runs-on: ubuntu-latest
+    needs: [parse-event, load-registry]
+    
+    outputs:
+      auto_merge: ${{ steps.rules.outputs.auto_merge }}
+      require_review: ${{ steps.rules.outputs.require_review }}
+      priority_filter: ${{ steps.rules.outputs.priority_filter }}
+    
+    steps:
+      - name: "📥 Checkout"
+        uses: actions/checkout@v4
+      
+      - name: "⚙️ Apply Automation Rules"
+        id: rules
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "⚙️ APPLYING AUTOMATION RULES"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          SDK_VERSION="${{ needs.parse-event.outputs.sdk_version }}"
+          
+          # Determina tipo de versão
+          if [[ "$SDK_VERSION" =~ ^[0-9]+\.0\.0$ ]]; then
+            VERSION_TYPE="major"
+          elif [[ "$SDK_VERSION" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+            VERSION_TYPE="minor"
+          else
+            VERSION_TYPE="patch"
+          fi
+          
+          echo "Version Type: $VERSION_TYPE"
+          
+          # Aplica regras baseadas no tipo
+          case $VERSION_TYPE in
+            "patch")
+              AUTO_MERGE="true"
+              REQUIRE_REVIEW="false"
+              PRIORITY_FILTER="all"
+              ;;
+            "minor")
+              AUTO_MERGE="false"
+              REQUIRE_REVIEW="true"
+              PRIORITY_FILTER="all"
+              ;;
+            "major")
+              AUTO_MERGE="false"
+              REQUIRE_REVIEW="true"
+              PRIORITY_FILTER="critical,high"
+              ;;
+          esac
+          
+          echo "📋 Rules Applied:"
+          echo "   Auto-merge: $AUTO_MERGE"
+          echo "   Require Review: $REQUIRE_REVIEW"
+          echo "   Priority Filter: $PRIORITY_FILTER"
+          
+          echo "auto_merge=$AUTO_MERGE" >> $GITHUB_OUTPUT
+          echo "require_review=$REQUIRE_REVIEW" >> $GITHUB_OUTPUT
+          echo "priority_filter=$PRIORITY_FILTER" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 4: DISPATCH TO CONSUMERS (MATRIX)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  dispatch-validation:
+    name: "🚀 Dispatch"
+    runs-on: ubuntu-latest
+    needs: [parse-event, load-registry, apply-rules]
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        consumer: ${{ fromJSON(needs.load-registry.outputs.consumers) }}
+    
+    steps:
+      - name: "🚀 Dispatch to ${{ matrix.consumer.name }}"
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DISPATCH_TOKEN }}
+          repository: ${{ matrix.consumer.repository }}
+          event-type: ${{ matrix.consumer.event_type }}
+          client-payload: |
+            {
+              "validation_id": "${{ needs.parse-event.outputs.validation_id }}",
+              "sdk": {
+                "version": "${{ needs.parse-event.outputs.sdk_version }}",
+                "release_url": "${{ github.event.client_payload.sdk.release_url || 'N/A' }}"
+              },
+              "consumer": {
+                "name": "${{ matrix.consumer.name }}",
+                "priority": "${{ matrix.consumer.priority }}"
+              },
+              "automation": {
+                "auto_merge": ${{ needs.apply-rules.outputs.auto_merge }},
+                "require_review": ${{ needs.apply-rules.outputs.require_review }}
+              },
+              "callback": {
+                "repository": "${{ github.repository }}",
+                "event_type": "consumer.validation.complete"
+              }
+            }
+      
+      - name: "📋 Log Dispatch"
+        run: |
+          echo "✅ Dispatched to ${{ matrix.consumer.name }}"
+          echo "   Repository: ${{ matrix.consumer.repository }}"
+          echo "   Event: ${{ matrix.consumer.event_type }}"
+          echo "   SDK Version: ${{ needs.parse-event.outputs.sdk_version }}"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 5: HANDLE CONSUMER CALLBACK
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  handle-callback:
+    name: "📩 Handle Callback"
+    runs-on: ubuntu-latest
+    needs: parse-event
+    if: needs.parse-event.outputs.event_type == 'consumer.validation.complete'
+    
+    steps:
+      - name: "📩 Process Consumer Callback"
+        run: |
+          echo "═══════════════════════════════════════════════════════════════"
+          echo "📩 PROCESSING CONSUMER CALLBACK"
+          echo "═══════════════════════════════════════════════════════════════"
+          
+          CONSUMER="${{ github.event.client_payload.consumer.name }}"
+          STATUS="${{ github.event.client_payload.status }}"
+          PR_URL="${{ github.event.client_payload.pr_url }}"
+          
+          echo "Consumer: $CONSUMER"
+          echo "Status: $STATUS"
+          echo "PR URL: $PR_URL"
+          
+          if [ "$STATUS" == "success" ]; then
+            echo "✅ $CONSUMER validation passed!"
+          else
+            echo "❌ $CONSUMER validation failed!"
+          fi
+      
+      - name: "📋 Update Summary"
+        run: |
+          echo "## 📩 Consumer Validation Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Property | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Consumer** | ${{ github.event.client_payload.consumer.name }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Status** | ${{ github.event.client_payload.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **PR** | ${{ github.event.client_payload.pr_url || 'N/A' }} |" >> $GITHUB_STEP_SUMMARY
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 6: SUMMARY
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  summary:
+    name: "📊 Summary"
+    runs-on: ubuntu-latest
+    needs: [parse-event, load-registry, dispatch-validation]
+    if: always() && needs.parse-event.outputs.event_type != 'consumer.validation.complete'
+    
+    steps:
+      - name: "📊 Generate Summary"
+        run: |
+          echo "## 🎯 Orchestrator Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 SDK Release" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** \`${{ needs.parse-event.outputs.sdk_version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **Validation ID:** \`${{ needs.parse-event.outputs.validation_id }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📋 Consumers Notified" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total:** ${{ needs.load-registry.outputs.consumer_count }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### ⚙️ Automation Rules Applied" >> $GITHUB_STEP_SUMMARY
+          echo "- **Auto-merge:** Configured per consumer" >> $GITHUB_STEP_SUMMARY
+          echo "- **Require Review:** Based on version type" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "---" >> $GITHUB_STEP_SUMMARY
+          echo "✅ All consumers have been notified. Check their repositories for validation results." >> $GITHUB_STEP_SUMMARY
