@@ -1,0 +1,495 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# 🚀 BATCH DISPATCHER - PARA 200+ MINI-APPS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# Este workflow é chamado pelo orchestrator quando há mais de 50 consumers
+# em uma wave. Ele processa em batches para evitar:
+#
+#   1. Limite de 256 jobs na matrix
+#   2. Rate limiting da API do GitHub
+#   3. Timeout de workflow
+#
+# ESTRATÉGIA:
+#   - Divide consumers em batches de 50
+#   - Processa cada batch sequencialmente
+#   - Dentro de cada batch, processa em paralelo (max 20)
+#   - Delay entre batches para rate limiting
+#
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: "🚀 Batch Dispatcher"
+
+on:
+  workflow_call:
+    inputs:
+      consumers_json:
+        description: 'JSON array of consumers to dispatch'
+        required: true
+        type: string
+      sdk_version:
+        description: 'SDK version'
+        required: true
+        type: string
+      validation_id:
+        description: 'Validation ID'
+        required: true
+        type: string
+      wave:
+        description: 'Wave name (critical, high, normal, low)'
+        required: true
+        type: string
+      batch_size:
+        description: 'Max consumers per batch'
+        required: false
+        type: number
+        default: 50
+      max_parallel:
+        description: 'Max parallel dispatches'
+        required: false
+        type: number
+        default: 20
+      delay_seconds:
+        description: 'Delay between batches'
+        required: false
+        type: number
+        default: 10
+    secrets:
+      DISPATCH_TOKEN:
+        required: true
+    outputs:
+      dispatched_count:
+        description: 'Number of consumers dispatched'
+        value: ${{ jobs.aggregate.outputs.total }}
+      failed_count:
+        description: 'Number of failed dispatches'
+        value: ${{ jobs.aggregate.outputs.failed }}
+
+jobs:
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 1: PREPARE BATCHES
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  prepare:
+    name: "📦 Prepare Batches"
+    runs-on: ubuntu-latest
+    outputs:
+      batches: ${{ steps.split.outputs.batches }}
+      batch_count: ${{ steps.split.outputs.batch_count }}
+      total_consumers: ${{ steps.split.outputs.total_consumers }}
+    
+    steps:
+      - name: "📦 Split into Batches"
+        id: split
+        run: |
+          CONSUMERS='${{ inputs.consumers_json }}'
+          BATCH_SIZE=${{ inputs.batch_size }}
+          
+          TOTAL=$(echo "$CONSUMERS" | jq 'length')
+          echo "📊 Total consumers: $TOTAL"
+          echo "📦 Batch size: $BATCH_SIZE"
+          
+          # Calcula número de batches
+          BATCH_COUNT=$(( (TOTAL + BATCH_SIZE - 1) / BATCH_SIZE ))
+          echo "🔢 Batches needed: $BATCH_COUNT"
+          
+          # Cria array de batches
+          BATCHES="["
+          for ((i=0; i<BATCH_COUNT; i++)); do
+            START=$((i * BATCH_SIZE))
+            END=$((START + BATCH_SIZE))
+            
+            BATCH=$(echo "$CONSUMERS" | jq ".[$START:$END]")
+            BATCH_NUM=$((i + 1))
+            
+            if [ $i -gt 0 ]; then
+              BATCHES="$BATCHES,"
+            fi
+            
+            BATCHES="$BATCHES{\"batch_num\": $BATCH_NUM, \"consumers\": $BATCH}"
+          done
+          BATCHES="$BATCHES]"
+          
+          echo "✅ Batches created"
+          
+          # Output
+          echo "batches=$(echo "$BATCHES" | jq -c .)" >> $GITHUB_OUTPUT
+          echo "batch_count=$BATCH_COUNT" >> $GITHUB_OUTPUT
+          echo "total_consumers=$TOTAL" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 2: PROCESS BATCH 1 (Primeiro batch imediato)
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  batch-1:
+    name: "📤 Batch 1"
+    runs-on: ubuntu-latest
+    needs: prepare
+    if: fromJSON(needs.prepare.outputs.batches)[0] != null
+    
+    outputs:
+      dispatched: ${{ steps.dispatch.outputs.dispatched }}
+      failed: ${{ steps.dispatch.outputs.failed }}
+    
+    steps:
+      - name: "🚀 Dispatch Batch 1"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          BATCH='${{ toJSON(fromJSON(needs.prepare.outputs.batches)[0].consumers) }}'
+          SDK_VERSION="${{ inputs.sdk_version }}"
+          VALIDATION_ID="${{ inputs.validation_id }}"
+          WAVE="${{ inputs.wave }}"
+          
+          DISPATCHED=0
+          FAILED=0
+          
+          # Processa cada consumer
+          for row in $(echo "$BATCH" | jq -r '.[] | @base64'); do
+            _jq() {
+              echo ${row} | base64 --decode | jq -r ${1}
+            }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT_TYPE=$(_jq '.event_type // "sdk.validate"')
+            
+            echo "🚀 Dispatching to $NAME ($REPO)..."
+            
+            # Dispatch com retry
+            for attempt in 1 2 3; do
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT_TYPE\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": \"$WAVE\",
+                    \"batch\": 1,
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {
+                      \"repository\": \"${{ github.repository }}\",
+                      \"event_type\": \"consumer.validation.complete\"
+                    }
+                  }
+                }")
+              
+              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+              
+              if [ "$HTTP_CODE" -eq 204 ] || [ "$HTTP_CODE" -eq 200 ]; then
+                echo "   ✅ Success"
+                DISPATCHED=$((DISPATCHED + 1))
+                break
+              elif [ $attempt -lt 3 ]; then
+                echo "   ⚠️ Retry $attempt (HTTP $HTTP_CODE)"
+                sleep $((attempt * 2))
+              else
+                echo "   ❌ Failed (HTTP $HTTP_CODE)"
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            
+            # Rate limiting: pequeno delay entre requests
+            sleep 0.5
+          done
+          
+          echo "dispatched=$DISPATCHED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "📊 Batch 1: $DISPATCHED dispatched, $FAILED failed"
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 3: PROCESS BATCH 2
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  batch-2:
+    name: "📤 Batch 2"
+    runs-on: ubuntu-latest
+    needs: [prepare, batch-1]
+    if: fromJSON(needs.prepare.outputs.batches)[1] != null
+    
+    outputs:
+      dispatched: ${{ steps.dispatch.outputs.dispatched }}
+      failed: ${{ steps.dispatch.outputs.failed }}
+    
+    steps:
+      - name: "⏳ Delay Between Batches"
+        run: |
+          echo "⏳ Waiting ${{ inputs.delay_seconds }}s before next batch..."
+          sleep ${{ inputs.delay_seconds }}
+      
+      - name: "🚀 Dispatch Batch 2"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          BATCH='${{ toJSON(fromJSON(needs.prepare.outputs.batches)[1].consumers) }}'
+          SDK_VERSION="${{ inputs.sdk_version }}"
+          VALIDATION_ID="${{ inputs.validation_id }}"
+          WAVE="${{ inputs.wave }}"
+          
+          DISPATCHED=0
+          FAILED=0
+          
+          for row in $(echo "$BATCH" | jq -r '.[] | @base64'); do
+            _jq() {
+              echo ${row} | base64 --decode | jq -r ${1}
+            }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT_TYPE=$(_jq '.event_type // "sdk.validate"')
+            
+            echo "🚀 Dispatching to $NAME..."
+            
+            for attempt in 1 2 3; do
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT_TYPE\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": \"$WAVE\",
+                    \"batch\": 2,
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {
+                      \"repository\": \"${{ github.repository }}\",
+                      \"event_type\": \"consumer.validation.complete\"
+                    }
+                  }
+                }")
+              
+              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+              
+              if [ "$HTTP_CODE" -eq 204 ] || [ "$HTTP_CODE" -eq 200 ]; then
+                DISPATCHED=$((DISPATCHED + 1))
+                break
+              elif [ $attempt -lt 3 ]; then
+                sleep $((attempt * 2))
+              else
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            
+            sleep 0.5
+          done
+          
+          echo "dispatched=$DISPATCHED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 4: PROCESS BATCH 3
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  batch-3:
+    name: "📤 Batch 3"
+    runs-on: ubuntu-latest
+    needs: [prepare, batch-2]
+    if: fromJSON(needs.prepare.outputs.batches)[2] != null
+    
+    outputs:
+      dispatched: ${{ steps.dispatch.outputs.dispatched }}
+      failed: ${{ steps.dispatch.outputs.failed }}
+    
+    steps:
+      - name: "⏳ Delay Between Batches"
+        run: sleep ${{ inputs.delay_seconds }}
+      
+      - name: "🚀 Dispatch Batch 3"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          BATCH='${{ toJSON(fromJSON(needs.prepare.outputs.batches)[2].consumers) }}'
+          SDK_VERSION="${{ inputs.sdk_version }}"
+          VALIDATION_ID="${{ inputs.validation_id }}"
+          WAVE="${{ inputs.wave }}"
+          
+          DISPATCHED=0
+          FAILED=0
+          
+          for row in $(echo "$BATCH" | jq -r '.[] | @base64'); do
+            _jq() {
+              echo ${row} | base64 --decode | jq -r ${1}
+            }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT_TYPE=$(_jq '.event_type // "sdk.validate"')
+            
+            for attempt in 1 2 3; do
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT_TYPE\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": \"$WAVE\",
+                    \"batch\": 3,
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {
+                      \"repository\": \"${{ github.repository }}\",
+                      \"event_type\": \"consumer.validation.complete\"
+                    }
+                  }
+                }")
+              
+              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+              
+              if [ "$HTTP_CODE" -eq 204 ] || [ "$HTTP_CODE" -eq 200 ]; then
+                DISPATCHED=$((DISPATCHED + 1))
+                break
+              elif [ $attempt -lt 3 ]; then
+                sleep $((attempt * 2))
+              else
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            
+            sleep 0.5
+          done
+          
+          echo "dispatched=$DISPATCHED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB 5: PROCESS BATCH 4
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  batch-4:
+    name: "📤 Batch 4"
+    runs-on: ubuntu-latest
+    needs: [prepare, batch-3]
+    if: fromJSON(needs.prepare.outputs.batches)[3] != null
+    
+    outputs:
+      dispatched: ${{ steps.dispatch.outputs.dispatched }}
+      failed: ${{ steps.dispatch.outputs.failed }}
+    
+    steps:
+      - name: "⏳ Delay Between Batches"
+        run: sleep ${{ inputs.delay_seconds }}
+      
+      - name: "🚀 Dispatch Batch 4"
+        id: dispatch
+        env:
+          DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+        run: |
+          BATCH='${{ toJSON(fromJSON(needs.prepare.outputs.batches)[3].consumers) }}'
+          SDK_VERSION="${{ inputs.sdk_version }}"
+          VALIDATION_ID="${{ inputs.validation_id }}"
+          WAVE="${{ inputs.wave }}"
+          
+          DISPATCHED=0
+          FAILED=0
+          
+          for row in $(echo "$BATCH" | jq -r '.[] | @base64'); do
+            _jq() {
+              echo ${row} | base64 --decode | jq -r ${1}
+            }
+            
+            NAME=$(_jq '.name')
+            REPO=$(_jq '.repository')
+            EVENT_TYPE=$(_jq '.event_type // "sdk.validate"')
+            
+            for attempt in 1 2 3; do
+              RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+                -H "Accept: application/vnd.github+json" \
+                -H "Authorization: Bearer $DISPATCH_TOKEN" \
+                "https://api.github.com/repos/$REPO/dispatches" \
+                -d "{
+                  \"event_type\": \"$EVENT_TYPE\",
+                  \"client_payload\": {
+                    \"validation_id\": \"$VALIDATION_ID\",
+                    \"wave\": \"$WAVE\",
+                    \"batch\": 4,
+                    \"sdk\": {\"version\": \"$SDK_VERSION\"},
+                    \"consumer\": {\"name\": \"$NAME\"},
+                    \"callback\": {
+                      \"repository\": \"${{ github.repository }}\",
+                      \"event_type\": \"consumer.validation.complete\"
+                    }
+                  }
+                }")
+              
+              HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+              
+              if [ "$HTTP_CODE" -eq 204 ]; then
+                DISPATCHED=$((DISPATCHED + 1))
+                break
+              elif [ $attempt -lt 3 ]; then
+                sleep $((attempt * 2))
+              else
+                FAILED=$((FAILED + 1))
+              fi
+            done
+            
+            sleep 0.5
+          done
+          
+          echo "dispatched=$DISPATCHED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+
+  # ═══════════════════════════════════════════════════════════════════════════════
+  # JOB FINAL: AGGREGATE RESULTS
+  # ═══════════════════════════════════════════════════════════════════════════════
+  
+  aggregate:
+    name: "📊 Aggregate"
+    runs-on: ubuntu-latest
+    needs: [prepare, batch-1, batch-2, batch-3, batch-4]
+    if: always()
+    
+    outputs:
+      total: ${{ steps.sum.outputs.total }}
+      failed: ${{ steps.sum.outputs.failed }}
+    
+    steps:
+      - name: "📊 Sum Results"
+        id: sum
+        run: |
+          B1_D=${{ needs.batch-1.outputs.dispatched || 0 }}
+          B1_F=${{ needs.batch-1.outputs.failed || 0 }}
+          B2_D=${{ needs.batch-2.outputs.dispatched || 0 }}
+          B2_F=${{ needs.batch-2.outputs.failed || 0 }}
+          B3_D=${{ needs.batch-3.outputs.dispatched || 0 }}
+          B3_F=${{ needs.batch-3.outputs.failed || 0 }}
+          B4_D=${{ needs.batch-4.outputs.dispatched || 0 }}
+          B4_F=${{ needs.batch-4.outputs.failed || 0 }}
+          
+          TOTAL=$((B1_D + B2_D + B3_D + B4_D))
+          FAILED=$((B1_F + B2_F + B3_F + B4_F))
+          
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          
+          echo "📊 BATCH DISPATCH SUMMARY"
+          echo "========================="
+          echo "Wave: ${{ inputs.wave }}"
+          echo "Total Dispatched: $TOTAL"
+          echo "Total Failed: $FAILED"
+          echo ""
+          echo "Batch 1: $B1_D dispatched, $B1_F failed"
+          echo "Batch 2: $B2_D dispatched, $B2_F failed"
+          echo "Batch 3: $B3_D dispatched, $B3_F failed"
+          echo "Batch 4: $B4_D dispatched, $B4_F failed"
+      
+      - name: "📊 Summary"
+        run: |
+          echo "## 🚀 Batch Dispatch Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Metric | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Wave** | ${{ inputs.wave }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Total Consumers** | ${{ needs.prepare.outputs.total_consumers }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Batches** | ${{ needs.prepare.outputs.batch_count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Dispatched** | ${{ steps.sum.outputs.total }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Failed** | ${{ steps.sum.outputs.failed }} |" >> $GITHUB_STEP_SUMMARY
